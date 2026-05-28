@@ -295,6 +295,52 @@
                                         <input type="number" id="edcPort" value="6746" placeholder="6745 untuk WS, 6746 untuk WSS">
                                         <small class="form-hint">Default: 6745 (WS), 6746 (WSS) - Sesuaikan dengan ECR Link</small>
                                     </div>
+
+                                    <!-- WebSocket Timeout Settings -->
+                                    <div style="background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem; margin: 1.5rem 0;">
+                                        <h3 style="margin: 0 0 1rem 0; font-size: 0.95rem; color: #374151;">⏱️ WebSocket Timeout Settings</h3>
+                                        
+                                        <div class="form-group">
+                                            <label for="wsConnectionTimeout">Connection Timeout (ms)</label>
+                                            <input type="number" id="wsConnectionTimeout" value="10000" min="1000" max="60000" step="1000" placeholder="10000">
+                                            <small class="form-hint">Waktu maksimal untuk establish koneksi WebSocket (default: 10000 ms / 10 detik)</small>
+                                        </div>
+                                        
+                                        <div class="form-group">
+                                            <label for="wsMessageTimeout">Message Response Timeout (ms)</label>
+                                            <input type="number" id="wsMessageTimeout" value="30000" min="5000" max="120000" step="1000" placeholder="30000">
+                                            <small class="form-hint">Waktu maksimal menunggu response dari EDC (default: 30000 ms / 30 detik)</small>
+                                        </div>
+
+                                        <div style="background: white; border: 1px solid #d1d5db; border-radius: 6px; padding: 0.75rem; margin-top: 0.75rem;">
+                                            <strong style="color: #1f2937; font-size: 0.85rem;">💡 Rekomendasi:</strong>
+                                            <ul style="margin: 0.5rem 0 0 0; padding-left: 1.25rem; color: #4b5563; font-size: 0.8rem; line-height: 1.6;">
+                                                <li><strong>Jaringan Cepat (LAN):</strong> Connection 5000ms, Message 15000ms</li>
+                                                <li><strong>Jaringan Normal:</strong> Connection 10000ms, Message 30000ms (default)</li>
+                                                <li><strong>Jaringan Lambat (WAN):</strong> Connection 20000ms, Message 60000ms</li>
+                                            </ul>
+                                        </div>
+
+                                        <!-- WebSocket Disconnect Simulation -->
+                                        <div style="background: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px; padding: 0.75rem; margin-top: 1rem;">
+                                            <strong style="color: #92400e; font-size: 0.85rem;">🔌 WebSocket Disconnect Simulation (Testing)</strong>
+                                            <p style="margin: 0.5rem 0 0 0; color: #78350f; font-size: 0.8rem;">Simulasi skenario jaringan WebSocket mati dari POS untuk testing:</p>
+                                            
+                                            <div class="form-group" style="margin-top: 0.75rem; margin-bottom: 0;">
+                                                <label for="wsDisconnectAfter">Disconnect After (ms)</label>
+                                                <input type="number" id="wsDisconnectAfter" value="0" min="0" max="300000" step="1000" placeholder="0">
+                                                <small class="form-hint">Berapa lama setelah send message, WebSocket akan disconnect (0 = disabled). Contoh: 5000 = disconnect 5 detik setelah send</small>
+                                            </div>
+
+                                            <div class="form-group" style="margin-bottom: 0;">
+                                                <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                                    <input type="checkbox" id="wsDisconnectOnSend" style="width: auto;">
+                                                    <span style="color: #78350f; font-size: 0.85rem;">Disconnect immediately on send (tanpa delay)</span>
+                                                </label>
+                                                <small class="form-hint">Jika dicentang, WebSocket akan disconnect langsung saat send message</small>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                                 
                                 <!-- API Fields -->
@@ -474,10 +520,13 @@
 
     <!-- Payment Processing Modal -->
     <div class="modal" id="paymentModal">
-        <div class="modal-overlay"></div>
+        <div class="modal-overlay" onclick="closePaymentModal()"></div>
         <div class="modal-content modal-large">
             <div class="modal-header">
                 <h3>Processing Payment</h3>
+                <button class="btn-close" onclick="closePaymentModal()">
+                    <i class="fas fa-times"></i>
+                </button>
             </div>
             <div class="modal-body text-center">
                 <div class="payment-status" id="paymentStatus">
