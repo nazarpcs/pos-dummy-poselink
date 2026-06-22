@@ -33,7 +33,10 @@ const state = {
         apiUrl: 'https://development-ecrlink.pcsindonesia.com',
         apiTimeout: 60,  // POS-side timeout in seconds for API mode
         mid: '',
-        tid: ''
+        tid: '',
+        // WebSocket timeout settings
+        wsConnectionTimeout: 10000,
+        wsMessageTimeout: 30000
     },
     
     // Menu & Cart
@@ -49,6 +52,20 @@ const state = {
     ],
     cart: [],
     
+    // Transaction tracking
+    currentTransaction: null,
+    currentTransactionTimeoutHandler: null,
+    lastApiRequest: null,
+    transactionStartTime: null,
+    transactionEndTime: null,
+    
+    // Pending UI state (countdown + manual retry)
+    pendingCountdownInterval: null,
+    currentApiAbortController: null,
+    userRequestedRetry: false,
+    statusPollInterval: null,
+    statusPollInFlight: false,
+    
     // Logs
     logs: []
 };
@@ -60,6 +77,11 @@ class ECRLinkWebSocket {
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 3;
         this.reconnectDelay = 3000;
+        this.connectionTimeout = 10000; // 10 seconds timeout for connection
+        this.messageTimeout = 30000; // 30 seconds timeout for message response
+        this.connectionTimeoutId = null;
+        this.messageTimeoutId = null;
+        this.connectionResolved = false; // Track if connection already resolved
     }
 
     connect(url) {
@@ -74,42 +96,144 @@ class ECRLinkWebSocket {
             updateConnectionStatus();
             log(`Connecting to ${url}...`, 'info');
 
+            this.connectionResolved = false; // Reset flag for new connection attempt
+
             try {
                 log(`Creating WebSocket connection to: ${url}`, 'info');
                 this.ws = new WebSocket(url);
                 
+                // Set connection timeout
+                this.connectionTimeoutId = setTimeout(() => {
+                    if (!this.connectionResolved && this.ws && this.ws.readyState === WebSocket.CONNECTING) {
+                        this.connectionResolved = true;
+                        
+                        log('========================================', 'error');
+                        log('⏱️ Connection Timeout', 'error');
+                        log('========================================', 'error');
+                        log(`Timeout Duration: ${this.connectionTimeout}ms`, 'error');
+                        log(`Connection URL: ${url}`, 'info');
+                        log(`Protocol: ${url.startsWith('wss://') ? 'WSS (Secure)' : 'WS (Non-Secure)'}`, 'info');
+                        log(`Timestamp: ${new Date().toLocaleString()}`, 'info');
+                        log('========================================', 'error');
+                        log('💡 Possible causes:', 'info');
+                        log('   1. EDC tidak aktif atau tidak merespon', 'info');
+                        log('   2. Port ' + (url.includes('6746') ? '6746 (WSS)' : '6745 (WS)') + ' tidak terbuka', 'info');
+                        log('   3. Jaringan terputus atau latency tinggi', 'info');
+                        log('   4. Firewall memblokir koneksi', 'info');
+                        
+                        this.ws.close();
+                        state.isConnecting = false;
+                        updateConnectionStatus();
+                        reject(new Error(`Connection timeout after ${this.connectionTimeout}ms`));
+                    }
+                }, this.connectionTimeout);
+                
                 this.ws.onopen = () => {
-                    log('✅ WebSocket connected successfully', 'success');
-                    state.isConnected = true;
-                    state.isConnecting = false;
-                    state.lastConnected = new Date();
-                    this.reconnectAttempts = 0;
-                    updateConnectionStatus();
-                    updateInfoPanel();
-                    resolve();
+                    // Clear connection timeout on successful connection
+                    if (this.connectionTimeoutId) {
+                        clearTimeout(this.connectionTimeoutId);
+                        this.connectionTimeoutId = null;
+                    }
+                    
+                    if (!this.connectionResolved) {
+                        this.connectionResolved = true;
+                        
+                        log('========================================', 'success');
+                        log('✅ WebSocket Connected Successfully', 'success');
+                        log('========================================', 'success');
+                        log(`Connected at: ${new Date().toLocaleTimeString('id-ID', { hour12: false })}`, 'success');
+                        log(`WebSocket State: OPEN (${this.ws.readyState})`, 'success');
+                        log(`URL: ${url}`, 'success');
+                        log('========================================', 'success');
+                        
+                        state.isConnected = true;
+                        state.isConnecting = false;
+                        state.lastConnected = new Date();
+                        this.reconnectAttempts = 0;
+                        updateConnectionStatus();
+                        updateInfoPanel();
+                        resolve();
+                    }
                 };
 
                 this.ws.onmessage = (event) => {
+                    // Clear message timeout when response received
+                    if (this.messageTimeoutId) {
+                        clearTimeout(this.messageTimeoutId);
+                        this.messageTimeoutId = null;
+                    }
                     handleMessage(event.data);
                 };
 
                 this.ws.onerror = (error) => {
-                    log('❌ WebSocket error occurred', 'error');
-                    console.error('WebSocket error:', error);
+                    // Clear connection timeout on error
+                    if (this.connectionTimeoutId) {
+                        clearTimeout(this.connectionTimeoutId);
+                        this.connectionTimeoutId = null;
+                    }
                     
-                    // Provide more detailed error info
-                    const protocol = url.startsWith('wss://') ? 'WSS (Secure)' : 'WS (Non-Secure)';
-                    log(`Connection type: ${protocol}`, 'info');
-                    log(`Target: ${url.replace(/wss?:\/\//, '')}`, 'info');
-                    
-                    state.isConnecting = false;
-                    updateConnectionStatus();
-                    reject(error);
+                    if (!this.connectionResolved) {
+                        this.connectionResolved = true;
+                        
+                        log('========================================', 'error');
+                        log('❌ WebSocket Error Occurred', 'error');
+                        log('========================================', 'error');
+                        log(`Error: ${error.message || 'Unknown error'}`, 'error');
+                        log(`Connection URL: ${url}`, 'info');
+                        log(`Protocol: ${url.startsWith('wss://') ? 'WSS (Secure)' : 'WS (Non-Secure)'}`, 'info');
+                        log(`Timestamp: ${new Date().toLocaleString()}`, 'info');
+                        log('========================================', 'error');
+                        
+                        console.error('WebSocket error:', error);
+                        
+                        // Provide more detailed error info
+                        const protocol = url.startsWith('wss://') ? 'WSS (Secure)' : 'WS (Non-Secure)';
+                        log(`Connection type: ${protocol}`, 'info');
+                        log(`Target: ${url.replace(/wss?:\/\//, '')}`, 'info');
+                        
+                        state.isConnecting = false;
+                        updateConnectionStatus();
+                        reject(error);
+                    }
                 };
 
                 this.ws.onclose = (event) => {
+                    // Clear connection timeout on close
+                    if (this.connectionTimeoutId) {
+                        clearTimeout(this.connectionTimeoutId);
+                        this.connectionTimeoutId = null;
+                    }
+                    
                     let closeReason = event.reason || 'No reason provided';
                     let errorHint = '';
+                    
+                    // Check if disconnect is from simulation
+                    const isSimulation = (state.settings.wsDisconnectOnSend || state.settings.wsDisconnectAfter > 0);
+                    
+                    // Log disconnect details
+                    log('========================================', 'warning');
+                    log('🔌 WebSocket Disconnected', 'warning');
+                    log('========================================', 'warning');
+                    log(`Close Code: ${event.code}`, 'info');
+                    log(`Close Reason: ${closeReason}`, 'info');
+                    log(`Was Clean: ${event.wasClean}`, 'info');
+                    
+                    if (isSimulation) {
+                        log('🔴 [SIMULATION] Disconnect triggered by simulation settings', 'warning');
+                        if (state.settings.wsDisconnectOnSend) {
+                            log('   - Disconnect immediately on send: ON', 'info');
+                        }
+                        if (state.settings.wsDisconnectAfter > 0) {
+                            log(`   - Disconnect after delay: ${state.settings.wsDisconnectAfter}ms`, 'info');
+                        }
+                    } else {
+                        log('🔴 [REAL] Disconnect triggered by network/EDC', 'warning');
+                    }
+                    
+                    log(`Connection URL: ${url}`, 'info');
+                    log(`Protocol: ${url.startsWith('wss://') ? 'WSS (Secure)' : 'WS (Non-Secure)'}`, 'info');
+                    log(`Reconnect Attempts: ${this.reconnectAttempts}/${this.maxReconnectAttempts}`, 'info');
+                    log('========================================', 'warning');
                     
                     // Provide helpful hints based on close code
                     switch(event.code) {
@@ -133,12 +257,15 @@ class ECRLinkWebSocket {
                             break;
                         case 1001:
                             closeReason = 'Going away (Code 1001)';
+                            errorHint = '💡 Server menutup koneksi dengan normal (graceful shutdown).';
                             break;
                         case 1002:
                             closeReason = 'Protocol error (Code 1002)';
+                            errorHint = '🚨 Protocol error - mungkin ada masalah dengan format data atau komunikasi.';
                             break;
                         case 1005:
                             closeReason = 'No status code (Code 1005)';
+                            errorHint = '💡 Koneksi ditutup tanpa status code - mungkin jaringan terputus.';
                             break;
                         case 1015:
                             closeReason = 'TLS Handshake failed (Code 1015)';
@@ -169,15 +296,34 @@ class ECRLinkWebSocket {
                     }
                 };
             } catch (error) {
-                log(`Failed to create WebSocket: ${error.message}`, 'error');
-                state.isConnecting = false;
-                updateConnectionStatus();
-                reject(error);
+                // Clear connection timeout on exception
+                if (this.connectionTimeoutId) {
+                    clearTimeout(this.connectionTimeoutId);
+                    this.connectionTimeoutId = null;
+                }
+                
+                if (!this.connectionResolved) {
+                    this.connectionResolved = true;
+                    log(`Failed to create WebSocket: ${error.message}`, 'error');
+                    state.isConnecting = false;
+                    updateConnectionStatus();
+                    reject(error);
+                }
             }
         });
     }
 
     disconnect() {
+        // Clear all timeouts
+        if (this.connectionTimeoutId) {
+            clearTimeout(this.connectionTimeoutId);
+            this.connectionTimeoutId = null;
+        }
+        if (this.messageTimeoutId) {
+            clearTimeout(this.messageTimeoutId);
+            this.messageTimeoutId = null;
+        }
+        
         if (this.ws) {
             this.ws.close();
             this.ws = null;
@@ -198,11 +344,76 @@ class ECRLinkWebSocket {
             const message = typeof data === 'string' ? data : JSON.stringify(data);
             this.ws.send(message);
             log(`Sent: ${message.substring(0, 200)}${message.length > 200 ? '...' : ''}`, 'sent');
+            
+            // Simulate WebSocket disconnect if configured
+            const disconnectOnSend = state.settings.wsDisconnectOnSend || false;
+            const disconnectAfter = state.settings.wsDisconnectAfter || 0;
+            
+            if (disconnectOnSend) {
+                log('🔌 [SIMULATION] WebSocket disconnect immediately on send', 'warning');
+                setTimeout(() => {
+                    if (this.ws) {
+                        this.ws.close();
+                        log('🔌 [SIMULATION] WebSocket disconnected', 'warning');
+                    }
+                }, 100);
+            } else if (disconnectAfter > 0) {
+                log(`🔌 [SIMULATION] WebSocket will disconnect after ${disconnectAfter}ms`, 'warning');
+                setTimeout(() => {
+                    if (this.ws) {
+                        this.ws.close();
+                        log(`🔌 [SIMULATION] WebSocket disconnected after ${disconnectAfter}ms`, 'warning');
+                    }
+                }, disconnectAfter);
+            }
+            
+            // Set message timeout for response
+            if (this.messageTimeoutId) {
+                clearTimeout(this.messageTimeoutId);
+            }
+            this.messageTimeoutId = setTimeout(() => {
+                log('========================================', 'warning');
+                log('⏱️ Message Response Timeout', 'warning');
+                log('========================================', 'warning');
+                log(`Timeout Duration: ${this.messageTimeout}ms`, 'warning');
+                log(`Timestamp: ${new Date().toLocaleString()}`, 'info');
+                log('========================================', 'warning');
+                log('💡 Possible causes:', 'info');
+                log('   1. EDC sedang processing transaksi (normal untuk transaksi kompleks)', 'info');
+                log('   2. Jaringan lambat atau latency tinggi', 'info');
+                log('   3. EDC overload atau tidak responsif', 'info');
+                log('   4. WebSocket connection terputus', 'info');
+                log('', 'info');
+                log('💡 Action: Cek status transaksi atau retry transaksi', 'info');
+                
+                this.messageTimeoutId = null;
+            }, this.messageTimeout);
+            
             return true;
         } catch (error) {
             log(`Send failed: ${error.message}`, 'error');
             return false;
         }
+    }
+
+    // Set connection timeout (in milliseconds)
+    setConnectionTimeout(ms) {
+        this.connectionTimeout = ms;
+        log(`Connection timeout set to ${ms}ms`, 'info');
+    }
+
+    // Set message response timeout (in milliseconds)
+    setMessageTimeout(ms) {
+        this.messageTimeout = ms;
+        log(`Message timeout set to ${ms}ms`, 'info');
+    }
+
+    // Get current timeout settings
+    getTimeoutSettings() {
+        return {
+            connectionTimeout: this.connectionTimeout,
+            messageTimeout: this.messageTimeout
+        };
     }
 }
 
@@ -406,6 +617,22 @@ const PayloadBuilder = {
     },
 
     /**
+     * Build Refund QRIS payload
+     * action: "Refund Qris"
+     * method: "qris"
+     * Berdasarkan dokumentasi POSe Link v4.13.0 section 4.9
+     */
+    buildRefundQris(amount, reffId) {
+        return {
+            action: 'Refund Qris',
+            reff_id: reffId,
+            pos_address: state.settings.posAddress,
+            time_stamp: this.getTimestamp(),
+            method: 'qris'
+        };
+    },
+
+    /**
      * Build QRIS TAP payload
      * action: "Sale"
      * method: "qris_tap"
@@ -443,11 +670,34 @@ function log(message, type = 'info') {
     
     renderLogs();
     
-    // Also log to console
-    const consoleMethod = type === 'error' ? console.error : 
-                          type === 'warning' ? console.warn : 
-                          type === 'success' ? console.log : console.log;
-    consoleMethod(`[${logEntry.type}] ${message}`);
+    // Console styling based on type
+    let consoleStyle = '';
+    let consoleMethod = console.log;
+    
+    switch(type) {
+        case 'error':
+            consoleStyle = 'color: #ff4444; font-weight: bold;';
+            consoleMethod = console.error;
+            break;
+        case 'warning':
+            consoleStyle = 'color: #ffaa00; font-weight: bold;';
+            consoleMethod = console.warn;
+            break;
+        case 'success':
+            consoleStyle = 'color: #00cc44; font-weight: bold;';
+            break;
+        case 'received':
+            consoleStyle = 'color: #0099ff; font-weight: bold;';
+            break;
+        case 'sent':
+            consoleStyle = 'color: #9900ff; font-weight: bold;';
+            break;
+        default:
+            consoleStyle = 'color: #666666;';
+    }
+    
+    // Log to console with styling
+    consoleMethod(`%c[${timeStr}] [${logEntry.type}] ${message}`, consoleStyle);
 }
 
 function renderLogs() {
@@ -569,12 +819,20 @@ async function connectToEDC() {
     
     state.connectionUrl = url;
     
+    // Apply timeout settings from configuration
+    const connectionTimeout = state.settings.wsConnectionTimeout || 10000;
+    const messageTimeout = state.settings.wsMessageTimeout || 30000;
+    ecrWs.setConnectionTimeout(connectionTimeout);
+    ecrWs.setMessageTimeout(messageTimeout);
+    
     log('========================================', 'info');
     log(`🚀 Starting connection attempt`, 'info');
     log(`📡 Protocol: ${protocol.toUpperCase()}`, 'info');
     log(`🌐 IP: ${ip}`, 'info');
     log(`🔌 Port: ${port}`, 'info');
     log(`🔗 Full URL: ${url}`, 'info');
+    log(`⏱️ Connection Timeout: ${connectionTimeout}ms`, 'info');
+    log(`⏱️ Message Timeout: ${messageTimeout}ms`, 'info');
     log('========================================', 'info');
     
     try {
@@ -591,6 +849,12 @@ async function testConnection() {
     if (state.settings.connectionType === 'api') {
         await testAPIConnection();
     } else {
+        // Apply timeout settings before testing
+        const connectionTimeout = state.settings.wsConnectionTimeout || 10000;
+        const messageTimeout = state.settings.wsMessageTimeout || 30000;
+        ecrWs.setConnectionTimeout(connectionTimeout);
+        ecrWs.setMessageTimeout(messageTimeout);
+        
         connectToEDC();
     }
 }
@@ -613,55 +877,137 @@ async function testAPIConnection() {
     log(`MID: ${state.settings.mid}`, 'info');
     log(`TID: ${state.settings.tid}`, 'info');
     log('', 'info');
-    
+
+    // ── Step 1: Health check middleware ──────────────────────────────────────
+    log('📡 Step 1: Checking middleware health...', 'info');
+    let middlewareOk = false;
     try {
-        // Test API endpoint with a simple request
+        const healthUrl = `${state.settings.apiUrl}/health`;
+        const healthRes = await fetch(healthUrl, {
+            method: 'GET',
+            mode: 'cors',
+            headers: { 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(5000)
+        });
+        const healthData = await healthRes.json().catch(() => ({}));
+        if (healthRes.ok && (healthData.status?.toLowerCase() === 'healthy' || healthData.status?.toLowerCase() === 'ok')) {
+            log(`✅ Middleware healthy: ${JSON.stringify(healthData)}`, 'success');
+            middlewareOk = true;
+        } else {
+            log(`⚠️ Middleware health check: HTTP ${healthRes.status} - ${JSON.stringify(healthData)}`, 'warning');
+            middlewareOk = true; // server reachable meskipun status tidak "healthy"
+        }
+    } catch (e) {
+        log(`❌ Middleware tidak dapat dijangkau: ${e.message}`, 'error');
+        log(`   Pastikan POS terhubung ke internet dan URL middleware benar`, 'info');
+    }
+
+    // ── Step 2: Validate MID/TID terdaftar di middleware ─────────────────────
+    log('', 'info');
+    log('🔑 Step 2: Validating MID/TID ke middleware...', 'info');
+    try {
         const apiUrl = `${state.settings.apiUrl}/api/v1/transaction`;
-        log(`Testing endpoint: ${apiUrl}`, 'info');
-        
-        // Try a test request (will fail with 400 but that's expected)
         const response = await fetch(apiUrl, {
             method: 'POST',
             mode: 'cors',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-            },
-            body: JSON.stringify({ test: true })
-        }).catch(err => {
-            if (err.name === 'TypeError' && err.message.includes('fetch')) {
-                throw new Error(`Cannot connect to API server. Please ensure:
-1. Middleware API is running at ${state.settings.apiUrl}
-2. If using localhost, ensure API and POS are on same origin
-3. Check API_CONTRACT.md for setup instructions`);
-            }
-            throw err;
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ test: true }),
+            signal: AbortSignal.timeout(8000)
         });
-        
-        if (response.status === 400) {
-            log(`✅ API server is running and reachable!`, 'success');
-            log(`   Note: 400 Bad Request is expected for test payload`, 'info');
-            showToast('Success', 'API server is reachable', 'success');
+        const testBody = await response.json().catch(() => ({}));
+        const errMsg = testBody?.error || '';
+        const isValidationError = errMsg.toLowerCase().includes('required') ||
+                                  errMsg.toLowerCase().includes('token') ||
+                                  errMsg.toLowerCase().includes('transaction_id') ||
+                                  errMsg.toLowerCase().includes('mid') ||
+                                  errMsg.toLowerCase().includes('tid');
+        if ((response.status === 400) && isValidationError) {
+            log(`✅ Endpoint transaction OK (validation error expected): "${errMsg}"`, 'success');
+        } else if (errMsg.toLowerCase().includes('unknown mid') || errMsg.toLowerCase().includes('unknown tid')) {
+            log(`❌ MID/TID tidak terdaftar di middleware: "${errMsg}"`, 'error');
         } else if (response.ok) {
-            log(`✅ API connection successful (Status: ${response.status})`, 'success');
-            showToast('Success', 'API connection test successful', 'success');
+            log(`✅ Endpoint transaction OK (HTTP ${response.status})`, 'success');
         } else {
-            log(`⚠️ API returned status: ${response.status}`, 'warning');
+            log(`⚠️ Endpoint transaction: HTTP ${response.status} - ${errMsg}`, 'warning');
         }
-        
-    } catch (error) {
-        log(`❌ API connection failed:`, 'error');
-        log(`   ${error.message}`, 'error');
-        log('', 'info');
-        log('💡 Troubleshooting:', 'info');
-        log('   1. Ensure middleware is running on the API URL', 'info');
-        log('   2. Check firewall/antivirus is not blocking the connection', 'info');
-        log('   3. If API is on different origin, ensure CORS is enabled', 'info');
-        log('   4. Try accessing API directly via curl/Postman first', 'info');
-        showToast('Error', 'API connection failed. Check Activity Log for details.', 'error');
+    } catch (e) {
+        log(`❌ Endpoint transaction tidak dapat dijangkau: ${e.message}`, 'error');
     }
-    
+
+    // ── Step 3: WebSocket handshake ke EDC (jika IP EDC diisi) ───────────────
+    log('', 'info');
+    log('📶 Step 3: WebSocket handshake ke EDC...', 'info');
+    const edcIp = state.settings.edcIp;
+    if (!edcIp) {
+        log('⚠️ EDC IP tidak diisi — skip WebSocket handshake test', 'warning');
+        log('   (Mode API tidak membutuhkan koneksi langsung ke EDC, tapi tes ini', 'info');
+        log('    berguna untuk memastikan POS dan EDC berada di jaringan yang sama)', 'info');
+    } else {
+        const wsPort = state.settings.edcPort || '6746';
+        const wsProto = state.settings.connectionType === 'wss' ? 'wss' : 'ws';
+        const wsUrl = `${wsProto}://${edcIp}:${wsPort}`;
+        log(`   Mencoba handshake ke: ${wsUrl}`, 'info');
+        await testWebSocketHandshake(wsUrl);
+    }
+
+    log('', 'info');
     log('========================================', 'info');
+    log('🔌 TEST CONNECTION SELESAI', 'info');
+    log('========================================', 'info');
+    showToast('Info', 'Test connection selesai. Cek Activity Log untuk detail.', 'info');
+}
+
+/**
+ * Lakukan WebSocket handshake ke EDC, timeout 8 detik.
+ * Hanya cek apakah koneksi bisa dibuka (POS & EDC satu jaringan).
+ */
+function testWebSocketHandshake(wsUrl) {
+    return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+            log(`❌ WebSocket handshake timeout (8s) ke ${wsUrl}`, 'error');
+            log(`   EDC tidak dapat dijangkau. Kemungkinan:`, 'info');
+            log(`   1. POS dan EDC tidak dalam jaringan yang sama`, 'info');
+            log(`   2. IP/Port EDC salah`, 'info');
+            log(`   3. ECR Link belum aktif di EDC`, 'info');
+            try { ws.close(); } catch(_) {}
+            resolve();
+        }, 8000);
+
+        let ws;
+        try {
+            ws = new WebSocket(wsUrl);
+        } catch (e) {
+            clearTimeout(timeout);
+            log(`❌ Tidak bisa membuat koneksi WebSocket: ${e.message}`, 'error');
+            resolve();
+            return;
+        }
+
+        ws.onopen = () => {
+            clearTimeout(timeout);
+            log(`✅ WebSocket handshake BERHASIL ke ${wsUrl}`, 'success');
+            log(`   POS dan EDC berada dalam jaringan yang sama ✅`, 'success');
+            ws.close();
+            resolve();
+        };
+
+        ws.onerror = (e) => {
+            clearTimeout(timeout);
+            log(`❌ WebSocket handshake GAGAL ke ${wsUrl}`, 'error');
+            log(`   POS dan EDC kemungkinan TIDAK dalam jaringan yang sama`, 'error');
+            log(`   Atau ECR Link di EDC belum aktif / port salah`, 'info');
+            resolve();
+        };
+
+        ws.onclose = (e) => {
+            clearTimeout(timeout);
+            if (e.code === 1000 || e.code === 1001) return resolve();
+            if (e.code === 1006) {
+                log(`❌ WebSocket closed abnormally (code 1006) — EDC tidak support ${wsUrl.startsWith('wss') ? 'WSS' : 'WS'} atau tidak reachable`, 'error');
+            }
+            resolve();
+        };
+    });
 }
 
 /**
@@ -891,15 +1237,15 @@ function updateCartSummary() {
     
     // Enable/disable pay button
     const actionType = document.getElementById('actionType')?.value || 'Sale';
-    document.getElementById('payBtn').disabled = actionType !== 'Settlement' && state.cart.length === 0;
+    document.getElementById('payBtn').disabled = actionType !== 'Settlement' && actionType !== 'RefundQris' && state.cart.length === 0;
 }
 
 // ===== Payment Processing =====
 async function processPayment() {
     const actionType = document.getElementById('actionType')?.value || 'Sale';
     
-    // Settlement doesn't require cart items
-    if (actionType !== 'Settlement' && state.cart.length === 0) {
+    // Settlement and RefundQris don't require cart items
+    if (actionType !== 'Settlement' && actionType !== 'RefundQris' && state.cart.length === 0) {
         showToast('Error', 'Cart is empty', 'error');
         return;
     }
@@ -920,6 +1266,18 @@ async function processPayment() {
     const subtotal = state.cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
     const tax = Math.round(subtotal * 0.1);
     const total = subtotal + tax;
+    
+    // Start transaction timing
+    state.transactionStartTime = new Date();
+    
+    log('========================================', 'info');
+    log(`🛒 TRANSACTION STARTED`, 'info');
+    log('========================================', 'info');
+    log(`Action Type: ${actionType}`, 'info');
+    log(`Payment Method: ${paymentMethod}`, 'info');
+    log(`Amount: Rp ${formatPrice(total)}`, 'info');
+    log(`Timestamp: ${state.transactionStartTime.toLocaleString('id-ID')}`, 'info');
+    log('========================================', 'info');
     
     try {
         // Ensure connection
@@ -957,6 +1315,13 @@ async function processPayment() {
             case 'QrisTap':
                 payload = PayloadBuilder.buildQrisTap(total);
                 break;
+            case 'RefundQris':
+                const refundRef = document.getElementById('refundReferenceNumber')?.value?.trim();
+                if (!refundRef) {
+                    throw new Error('Reff ID wajib diisi untuk Refund QRIS');
+                }
+                payload = PayloadBuilder.buildRefundQris(total, refundRef);
+                break;
             default:
                 payload = PayloadBuilder.buildSale(total, paymentMethod);
         }
@@ -970,7 +1335,29 @@ async function processPayment() {
         const encryptedToken = ECREncryption.generateToken(payload);
         
         // Send to EDC
-        updatePaymentStatus('sending', 'Sending to EDC...', 'Waiting for EDC response');
+        const messageTimeoutMs = state.settings.wsMessageTimeout || 30000;
+        showPendingStatus({
+            message: 'Sending to EDC...',
+            detail: 'Menunggu response dari EDC',
+            timeoutMs: messageTimeoutMs,
+            onRetry: () => {
+                if (state.currentTransactionTimeoutHandler) {
+                    clearTimeout(state.currentTransactionTimeoutHandler);
+                    state.currentTransactionTimeoutHandler = null;
+                }
+                retryTransactionViaWS();
+            }
+        });
+        
+        // Store transaction info for response handling and retry
+        state.currentTransaction = {
+            trxId: payload.trx_id,
+            action: payload.action,
+            amount: total,
+            timestamp: new Date(),
+            encryptedToken: encryptedToken,
+            payload: payload
+        };
         
         // Send as raw encrypted string (token only)
         const sent = ecrWs.send(encryptedToken);
@@ -978,13 +1365,50 @@ async function processPayment() {
             throw new Error('Failed to send payment request');
         }
         
-        // Store transaction info for response handling
-        state.currentTransaction = {
-            trxId: payload.trx_id,
-            action: payload.action,
-            amount: total,
-            timestamp: new Date()
-        };
+        // Set timeout for WebSocket response
+        const messageTimeoutHandler = setTimeout(() => {
+            log(`⏱️ WebSocket message timeout for trx_id: ${payload.trx_id}`, 'warning');
+            stopPendingCountdown();
+            
+            const statusEl = document.getElementById('paymentStatus');
+            const detailsEl = document.getElementById('paymentDetails');
+            const footerEl = document.getElementById('paymentFooter');
+            
+            if (statusEl && detailsEl && footerEl) {
+                statusEl.style.display = 'none';
+                detailsEl.style.display = 'block';
+                footerEl.style.display = 'flex';
+                
+                detailsEl.innerHTML = `
+                    <div class="payment-result error">
+                        <div class="result-title error">
+                            <i class="fas fa-clock"></i> Transaction Timeout
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Transaction ID</span>
+                            <span class="result-value">${payload.trx_id}</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Error</span>
+                            <span class="result-value" style="color: var(--danger-color);">EDC tidak merespon dalam ${messageTimeoutMs}ms</span>
+                        </div>
+                        <p style="margin-top: 1rem; font-size: 0.875rem; color: var(--gray-600);">
+                            Transaksi mungkin masih diproses di EDC. Gunakan tombol di bawah untuk retry atau cek status transaksi.
+                        </p>
+                    </div>
+                `;
+                
+                footerEl.innerHTML = `
+                    <button class="btn btn-outline" onclick="closePaymentModal()">Tutup</button>
+                    <button class="btn btn-primary" onclick="retryTransactionViaWS()">
+                        <i class="fas fa-redo"></i> Retry Transaksi
+                    </button>
+                `;
+            }
+        }, messageTimeoutMs);
+        
+        // Store timeout handler for cleanup
+        state.currentTransactionTimeoutHandler = messageTimeoutHandler;
         
         // Wait for response (in real implementation, this would be handled by onmessage)
         // For demo purposes, we'll wait for actual response from EDC
@@ -1000,14 +1424,29 @@ async function processPayment() {
 }
 
 function handleMessage(data) {
-    log(`Received: ${data.substring(0, 500)}${data.length > 500 ? '...' : ''}`, 'received');
+    // Clear message timeout when response received
+    if (state.currentTransactionTimeoutHandler) {
+        clearTimeout(state.currentTransactionTimeoutHandler);
+        state.currentTransactionTimeoutHandler = null;
+        log('✅ Message timeout cleared - response received', 'success');
+    }
+    stopPendingCountdown();
+    stopStatusPolling();
+    
+    log('========================================', 'received');
+    log(`📨 Received: ${data.substring(0, 500)}${data.length > 500 ? '...' : ''}`, 'received');
+    log('========================================', 'received');
     
     try {
         const response = JSON.parse(data);
+        log(`✅ Response parsed successfully`, 'success');
+        log(`Response RC: ${response.rc || 'N/A'}`, 'info');
+        log(`Response Status: ${response.status || 'N/A'}`, 'info');
         handlePaymentResponse(response);
     } catch (error) {
         // If not JSON, treat as raw response
-        log(`Raw response received (not JSON): ${data.substring(0, 200)}`, 'warning');
+        log(`⚠️ Raw response received (not JSON): ${data.substring(0, 200)}`, 'warning');
+        log(`Parse error: ${error.message}`, 'warning');
         handlePaymentResponse({
             success: true,
             raw: data
@@ -1016,6 +1455,60 @@ function handleMessage(data) {
 }
 
 function handlePaymentResponse(response) {
+    // Jika response status PENDING, jangan tutup dialog pending; biarkan countdown jalan.
+    const statusLower = String(response?.status || '').toLowerCase();
+    const isPending = statusLower === 'pending' || response?.pending === true;
+    if (isPending) {
+        log('⏳ Response status PENDING, menunggu final response dari EDC...', 'warning');
+        const connectionType = state.settings.connectionType || 'wss';
+        const timeoutMs = connectionType === 'api'
+            ? (state.settings.apiTimeout || 60) * 1000
+            : (state.settings.wsMessageTimeout || 30000);
+        const trxId = response?.trx_id || state.lastApiRequest?.requestBody?.trx_id;
+        // Selalu re-render: countdown fresh + tombol retry yang fungsional.
+        showPendingStatus({
+            message: 'Menunggu hasil transaksi...',
+            detail: `Status: PENDING (trx_id: ${trxId || '-'})`,
+            timeoutMs,
+            onRetry: () => {
+                if (connectionType === 'api') {
+                    stopStatusPolling();
+                    retryTransactionViaFMS();
+                } else {
+                    retryTransactionViaWS();
+                }
+            }
+        });
+        // Auto-poll status setiap 2 detik (khusus mode API)
+        if (connectionType === 'api' && trxId) {
+            startStatusPolling(trxId, 2000);
+        }
+        return;
+    }
+    
+    // Bukan pending → stop semua timer/poll
+    stopStatusPolling();
+    stopPendingCountdown();
+    
+    // End transaction timing
+    state.transactionEndTime = new Date();
+    const startTime = state.transactionStartTime || state.transactionEndTime;
+    const duration = state.transactionEndTime - startTime;
+    const durationSeconds = (duration / 1000).toFixed(2);
+    
+    log('========================================', 'info');
+    log(`🔄 TRANSACTION COMPLETED`, 'info');
+    log('========================================', 'info');
+    log(`Duration: ${durationSeconds}s (${duration}ms)`, 'info');
+    log(`Start Time: ${startTime.toLocaleTimeString('id-ID', { hour12: false })}`, 'info');
+    log(`End Time: ${state.transactionEndTime.toLocaleTimeString('id-ID', { hour12: false })}`, 'info');
+    log('========================================', 'info');
+    
+    log('========================================', 'info');
+    log('🔄 Processing Payment Response', 'info');
+    log('========================================', 'info');
+    log(`Response object: ${JSON.stringify(response).substring(0, 300)}...`, 'info');
+    
     const statusEl = document.getElementById('paymentStatus');
     const detailsEl = document.getElementById('paymentDetails');
     const footerEl = document.getElementById('paymentFooter');
@@ -1027,140 +1520,128 @@ function handlePaymentResponse(response) {
     state.totalTransactions++;
     updateInfoPanel();
     
-    // Check if it's a success response (rc: "00" or status: "success"/"paid")
+    // Check if it's a success response (rc: "00" or status: "success"/"paid"/"refund")
     const isSuccess = response.rc === '00' || 
                       response.status?.toLowerCase() === 'success' || 
                       response.status?.toLowerCase() === 'paid' ||
+                      response.status?.toLowerCase() === 'refund' ||
                       response.success === true;
     
+    // Unpaid is not a failure, it's a warning state (QRIS belum dibayar)
+    const isUnpaid = response.status?.toLowerCase() === 'unpaid';
+    
+    log(`Is Success: ${isSuccess}, Is Unpaid: ${isUnpaid}`, 'info');
+    log(`RC: ${response.rc}, Status: ${response.status}`, 'info');
+    
+    let titleClass, titleIcon, titleText, statusColor;
     if (isSuccess) {
-        let resultHtml = `
-            <div class="payment-result success">
-                <div class="result-title success">
-                    <i class="fas fa-check-circle"></i> Transaction Success
-                </div>
-        `;
-        
-        // Add common fields if available
-        if (response.trx_id) {
-            resultHtml += `
-                <div class="result-item">
-                    <span class="result-label">Transaction ID</span>
-                    <span class="result-value">${response.trx_id}</span>
-                </div>
-            `;
-        }
-        
-        if (response.trace_number) {
-            resultHtml += `
-                <div class="result-item">
-                    <span class="result-label">Trace Number</span>
-                    <span class="result-value">${response.trace_number}</span>
-                </div>
-            `;
-        }
-        
-        if (response.amount) {
-            resultHtml += `
-                <div class="result-item">
-                    <span class="result-label">Amount</span>
-                    <span class="result-value">Rp ${formatPrice(parseInt(response.amount))}</span>
-                </div>
-            `;
-        }
-        
-        if (response.approval && response.approval !== 'N/A') {
-            resultHtml += `
-                <div class="result-item">
-                    <span class="result-label">Approval Code</span>
-                    <span class="result-value">${response.approval}</span>
-                </div>
-            `;
-        }
-        
-        if (response.reference_number && response.reference_number !== 'N/A') {
-            resultHtml += `
-                <div class="result-item">
-                    <span class="result-label">Reference Number</span>
-                    <span class="result-value">${response.reference_number}</span>
-                </div>
-            `;
-        }
-        
-        if (response.card_name && response.card_name !== 'N/A') {
-            resultHtml += `
-                <div class="result-item">
-                    <span class="result-label">Card Type</span>
-                    <span class="result-value">${response.card_name}</span>
-                </div>
-            `;
-        }
-        
-        if (response.pan && response.pan !== 'N/A') {
-            resultHtml += `
-                <div class="result-item">
-                    <span class="result-label">Card Number</span>
-                    <span class="result-value">${response.pan}</span>
-                </div>
-            `;
-        }
-        
-        if (response.status) {
-            resultHtml += `
-                <div class="result-item">
-                    <span class="result-label">Status</span>
-                    <span class="result-value" style="color: var(--success-color); text-transform: uppercase;">${response.status}</span>
-                </div>
-            `;
-        }
-        
-        if (response.rc && response.rc !== 'N/A') {
-            resultHtml += `
-                <div class="result-item">
-                    <span class="result-label">Response Code</span>
-                    <span class="result-value">${response.rc}</span>
-                </div>
-            `;
-        }
-        
-        resultHtml += `</div>`;
-        detailsEl.innerHTML = resultHtml;
-        
-        log(`Transaction successful: ${response.trx_id || 'N/A'}`, 'success');
+        titleClass = 'success';
+        titleIcon = 'fa-check-circle';
+        titleText = 'Transaction Success';
+        statusColor = 'var(--success-color)';
+    } else if (isUnpaid) {
+        titleClass = 'error';
+        titleIcon = 'fa-exclamation-circle';
+        titleText = 'QRIS Unpaid';
+        statusColor = 'var(--warning-color, #f59e0b)';
+    } else {
+        titleClass = 'error';
+        titleIcon = 'fa-times-circle';
+        titleText = 'Transaction Failed';
+        statusColor = 'var(--danger-color)';
+    }
+
+    let resultHtml = `
+        <div class="payment-result ${titleClass}">
+            <div class="result-title ${titleClass}">
+                <i class="fas ${titleIcon}"></i> ${titleText}
+            </div>
+    `;
+
+    resultHtml += renderResponseItems(response, statusColor);
+
+    resultHtml += `</div>`;
+    detailsEl.innerHTML = resultHtml;
+
+    if (isSuccess) {
+        log(`✅ Transaction successful: ${response.trx_id || 'N/A'}`, 'success');
+        log('========================================', 'info');
         showToast('Success', 'Transaction processed successfully', 'success');
-        
-        // Clear cart after successful payment
         clearCart();
     } else {
-        let errorMessage = response.msg || response.error || 'Transaction failed';
-        
-        detailsEl.innerHTML = `
-            <div class="payment-result error">
-                <div class="result-title error">
-                    <i class="fas fa-times-circle"></i> Transaction Failed
-                </div>
-                <div class="result-item">
-                    <span class="result-label">Error</span>
-                    <span class="result-value">${errorMessage}</span>
-                </div>
-                ${response.rc ? `
-                <div class="result-item">
-                    <span class="result-label">Response Code</span>
-                    <span class="result-value">${response.rc}</span>
-                </div>
-                ` : ''}
-                ${response.status ? `
-                <div class="result-item">
-                    <span class="result-label">Status</span>
-                    <span class="result-value" style="color: var(--danger-color);">${response.status}</span>
-                </div>
-                ` : ''}
-            </div>
-        `;
-        
-        log(`Transaction failed: ${errorMessage}`, 'error');
+        const errorMessage = response.msg || response.error || 'Transaction failed';
+        log(`❌ Transaction failed: ${errorMessage}`, 'error');
+        log('========================================', 'info');
         showToast('Error', errorMessage, 'error');
     }
+}
+
+/**
+ * Render semua field response apa adanya ke dalam list result-item.
+ * Tidak ada whitelist, semua key yang dikirim ECR akan ditampilkan.
+ */
+function renderResponseItems(response, statusColor = 'var(--success-color)') {
+    if (!response || typeof response !== 'object') {
+        return `
+            <div class="result-item">
+                <span class="result-label">Response</span>
+                <span class="result-value">${escapeHtml(String(response))}</span>
+            </div>
+        `;
+    }
+
+    let html = '';
+    for (const [key, rawValue] of Object.entries(response)) {
+        if (rawValue === undefined || rawValue === null || rawValue === '') continue;
+
+        const label = formatFieldLabel(key);
+        let valueHtml;
+        let extraStyle = '';
+
+        if (typeof rawValue === 'object') {
+            // Objek / array → tampilkan sebagai JSON formatted
+            valueHtml = `<pre style="margin:0;white-space:pre-wrap;word-break:break-word;font-size:0.8125rem;">${escapeHtml(JSON.stringify(rawValue, null, 2))}</pre>`;
+        } else {
+            const strValue = String(rawValue);
+            if (key === 'amount' && !isNaN(parseInt(strValue))) {
+                valueHtml = `Rp ${formatPrice(parseInt(strValue))}`;
+            } else if (key === 'status') {
+                valueHtml = escapeHtml(strValue);
+                extraStyle = ` style="color: ${statusColor}; text-transform: uppercase;"`;
+            } else {
+                valueHtml = escapeHtml(strValue);
+            }
+        }
+
+        html += `
+            <div class="result-item">
+                <span class="result-label">${escapeHtml(label)}</span>
+                <span class="result-value"${extraStyle}>${valueHtml}</span>
+            </div>
+        `;
+    }
+    return html;
+}
+
+/**
+ * Ubah key seperti "trace_number" atau "reffid" menjadi label yang rapi.
+ */
+function formatFieldLabel(key) {
+    return String(key)
+        .replace(/[_\-]+/g, ' ')
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 function showPaymentModal() {
@@ -1170,6 +1651,23 @@ function showPaymentModal() {
 
 function closePaymentModal() {
     document.getElementById('paymentModal').classList.remove('active');
+    
+    // Clear transaction timeout if exists
+    if (state.currentTransactionTimeoutHandler) {
+        clearTimeout(state.currentTransactionTimeoutHandler);
+        state.currentTransactionTimeoutHandler = null;
+    }
+    
+    stopPendingCountdown();
+    stopStatusPolling();
+    if (state.currentApiAbortController) {
+        try { state.currentApiAbortController.abort(); } catch (_) {}
+        state.currentApiAbortController = null;
+    }
+    state.userRequestedRetry = false;
+    
+    // Clear current transaction
+    state.currentTransaction = null;
     
     // Reset modal content
     setTimeout(() => {
@@ -1189,6 +1687,167 @@ function updatePaymentStatus(status, message, detail) {
     `;
 }
 
+/**
+ * Tampilkan status "pending" dengan countdown realtime + tombol Retry manual.
+ *
+ * @param {object} opts
+ * @param {string} opts.message      Pesan utama (contoh: "Sending to API...")
+ * @param {string} opts.detail       Detail text di bawah countdown
+ * @param {number} opts.timeoutMs    Durasi timeout dalam ms (countdown source)
+ * @param {function} opts.onRetry    Callback saat user klik Retry Sekarang
+ */
+function showPendingStatus({ message, detail, timeoutMs, onRetry }) {
+    stopPendingCountdown();
+
+    const statusEl = document.getElementById('paymentStatus');
+    const detailsEl = document.getElementById('paymentDetails');
+    const footerEl = document.getElementById('paymentFooter');
+
+    if (!statusEl) return;
+
+    statusEl.style.display = 'block';
+    if (detailsEl) detailsEl.style.display = 'none';
+    if (footerEl) footerEl.style.display = 'none';
+
+    const deadline = Date.now() + (timeoutMs || 0);
+
+    statusEl.innerHTML = `
+        <div class="spinner"></div>
+        <p class="status-message">${message}</p>
+        <p class="status-detail">${detail || ''}</p>
+        <div id="pendingCountdown" style="margin-top: 1rem; font-size: 1.75rem; font-weight: 700; color: var(--primary-color, #1e40af); font-variant-numeric: tabular-nums;">
+            ${formatCountdown(timeoutMs)}
+        </div>
+        <p style="margin-top: 0.25rem; font-size: 0.8125rem; color: var(--gray-600, #6b7280);">
+            Sisa waktu menunggu response
+        </p>
+        <div style="margin-top: 1.25rem;">
+            <button id="pendingRetryBtn" type="button" class="btn btn-outline">
+                <i class="fas fa-redo"></i> Retry Sekarang
+            </button>
+        </div>
+    `;
+
+    const retryBtn = document.getElementById('pendingRetryBtn');
+    if (retryBtn && typeof onRetry === 'function') {
+        retryBtn.addEventListener('click', () => {
+            stopPendingCountdown();
+            retryBtn.disabled = true;
+            retryBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Retrying...';
+            try {
+                onRetry();
+            } catch (e) {
+                log(`Retry handler error: ${e.message}`, 'error');
+            }
+        });
+    }
+
+    // Start interval countdown
+    state.pendingCountdownInterval = setInterval(() => {
+        const remaining = deadline - Date.now();
+        const el = document.getElementById('pendingCountdown');
+        if (!el) {
+            stopPendingCountdown();
+            return;
+        }
+        if (remaining <= 0) {
+            el.textContent = '00:00';
+            el.style.color = 'var(--danger-color, #dc2626)';
+            const msgEl = statusEl.querySelector('.status-message');
+            const detailEl = statusEl.querySelector('.status-detail');
+            if (msgEl) msgEl.textContent = 'Timeout';
+            if (detailEl) detailEl.textContent = 'EDC tidak merespon dalam waktu yang ditentukan';
+            const btn = document.getElementById('pendingRetryBtn');
+            if (btn) {
+                btn.classList.remove('btn-outline');
+                btn.classList.add('btn-primary');
+                btn.innerHTML = '<i class="fas fa-redo"></i> Retry Transaksi';
+            }
+            stopPendingCountdown();
+            stopStatusPolling();
+            return;
+        }
+        el.textContent = formatCountdown(remaining);
+    }, 250);
+}
+
+function stopPendingCountdown() {
+    if (state.pendingCountdownInterval) {
+        clearInterval(state.pendingCountdownInterval);
+        state.pendingCountdownInterval = null;
+    }
+}
+
+/**
+ * Auto-poll GET /api/v1/transaction/status/{trxId} setiap intervalMs selama pending.
+ * Kalau response final (bukan PENDING), langsung render via handlePaymentResponse dan stop.
+ */
+function startStatusPolling(trxId, intervalMs = 2000) {
+    stopStatusPolling();
+    if (!trxId) return;
+
+    log(`🔁 Start auto-poll status trx_id=${trxId} setiap ${intervalMs}ms`, 'info');
+
+    const tick = async () => {
+        if (state.statusPollInFlight) return;
+        state.statusPollInFlight = true;
+        try {
+            const apiUrl = `${state.settings.apiUrl}/api/v1/transaction/status/${trxId}`;
+            const res = await fetch(apiUrl, {
+                method: 'GET',
+                mode: 'cors',
+                headers: { 'Accept': 'application/json' }
+            });
+            const data = await res.json().catch(() => ({}));
+            
+            // Extract inner transaction data (middleware wraps: {status: "...", data: {...}})
+            const txnData = data.data || data;
+            const statusLower = String(txnData?.status || '').toLowerCase();
+            
+            // Kalau HTTP error DAN tidak ada data transaksi berguna, skip
+            if (!res.ok && !txnData?.action && !txnData?.rc && !txnData?.trx_id) {
+                log(`Poll status HTTP ${res.status}: ${data.error || JSON.stringify(data).substring(0, 100)}`, 'warning');
+                return;
+            }
+            
+            const isStillPending = statusLower === 'pending' || txnData?.pending === true;
+            if (isStillPending) {
+                log(`Poll: masih PENDING (trx_id=${trxId})`, 'info');
+                return;
+            }
+            // Final response diterima → stop polling & render
+            log(`✅ Poll: final status diterima (${statusLower || txnData?.rc || 'unknown'})`, 'success');
+            stopStatusPolling();
+            stopPendingCountdown();
+            handlePaymentResponse(txnData);
+        } catch (err) {
+            log(`Poll status error: ${err.message}`, 'warning');
+        } finally {
+            state.statusPollInFlight = false;
+        }
+    };
+
+    // Jalankan 1x segera supaya user ga nunggu X detik pertama, lalu interval
+    tick();
+    state.statusPollInterval = setInterval(tick, intervalMs);
+}
+
+function stopStatusPolling() {
+    if (state.statusPollInterval) {
+        clearInterval(state.statusPollInterval);
+        state.statusPollInterval = null;
+        log('⏹️ Stop auto-poll status', 'info');
+    }
+    state.statusPollInFlight = false;
+}
+
+function formatCountdown(ms) {
+    const totalSec = Math.max(0, Math.ceil((ms || 0) / 1000));
+    const m = String(Math.floor(totalSec / 60)).padStart(2, '0');
+    const s = String(totalSec % 60).padStart(2, '0');
+    return `${m}:${s}`;
+}
+
 // ===== API Payment Processing =====
 async function processPaymentViaAPI() {
     const actionType = document.getElementById('actionType')?.value || 'Sale';
@@ -1201,6 +1860,9 @@ async function processPaymentViaAPI() {
     const subtotal = state.cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
     const tax = Math.round(subtotal * 0.1);
     const total = subtotal + tax;
+    
+    // Start transaction timing
+    state.transactionStartTime = new Date();
     
     try {
         // Validate API settings
@@ -1233,6 +1895,13 @@ async function processPaymentViaAPI() {
             case 'QrisTap':
                 payload = PayloadBuilder.buildQrisTap(total);
                 break;
+            case 'RefundQris':
+                const refundRefApi = document.getElementById('refundReferenceNumber')?.value?.trim();
+                if (!refundRefApi) {
+                    throw new Error('Reff ID wajib diisi untuk Refund QRIS');
+                }
+                payload = PayloadBuilder.buildRefundQris(total, refundRefApi);
+                break;
             default:
                 payload = PayloadBuilder.buildSale(total, paymentMethod);
         }
@@ -1246,14 +1915,25 @@ async function processPaymentViaAPI() {
         const encryptedToken = ECREncryption.generateToken(payload);
         
         // Prepare API request
-        updatePaymentStatus('sending', 'Sending to API...', 'Waiting for middleware response');
+        const apiTimeoutMs = (state.settings.apiTimeout || 60) * 1000;
+        showPendingStatus({
+            message: 'Sending to API...',
+            detail: 'Menunggu response dari middleware',
+            timeoutMs: apiTimeoutMs,
+            onRetry: () => {
+                state.userRequestedRetry = true;
+                if (state.currentApiAbortController) {
+                    try { state.currentApiAbortController.abort(); } catch (_) {}
+                }
+            }
+        });
         
         const apiUrl = `${state.settings.apiUrl}/api/v1/transaction`;
         const requestBody = {
             token: encryptedToken,
             mid: state.settings.mid,
             tid: state.settings.tid,
-            trx_id: payload.trx_id
+            trx_id: payload.trx_id || PayloadBuilder.generateTrxId()
         };
         
         // Store for retry/re-push capability
@@ -1262,11 +1942,12 @@ async function processPaymentViaAPI() {
         log(`API Request: ${apiUrl}`, 'info');
         
         // Send API request with configurable timeout
-        const apiTimeoutMs = (state.settings.apiTimeout || 60) * 1000;
         log(`[DEBUG] Fetching: ${apiUrl} (timeout: ${state.settings.apiTimeout || 60}s)`, 'info');
         log(`[DEBUG] Request body: ${JSON.stringify(requestBody).substring(0, 200)}...`, 'info');
         
+        state.userRequestedRetry = false;
         const controller = new AbortController();
+        state.currentApiAbortController = controller;
         const timeoutId = setTimeout(() => controller.abort(), apiTimeoutMs);
         
         const response = await fetch(apiUrl, {
@@ -1280,6 +1961,17 @@ async function processPaymentViaAPI() {
             signal: controller.signal
         }).catch(err => {
             clearTimeout(timeoutId);
+            stopPendingCountdown();
+            state.currentApiAbortController = null;
+            
+            // Handle abort from user (manual retry)
+            if (err.name === 'AbortError' && state.userRequestedRetry) {
+                state.userRequestedRetry = false;
+                log('🔁 User requested manual retry, cancelling current request', 'warning');
+                // Trigger retry via FMS (re-push same token)
+                retryTransactionViaFMS();
+                throw new Error('__USER_RETRY__');
+            }
             
             // Handle abort (timeout from POS side)
             if (err.name === 'AbortError') {
@@ -1302,6 +1994,8 @@ Check browser DevTools (F12) → Console → look for CORS errors.`);
         });
         
         clearTimeout(timeoutId);
+        stopPendingCountdown();
+        state.currentApiAbortController = null;
         
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
@@ -1360,15 +2054,23 @@ Check browser DevTools (F12) → Console → look for CORS errors.`);
         
         log(`API Response received: ${JSON.stringify(responseData)}`, 'received');
         
+        // Middleware bisa wrap response: {status: "...", data: {...actual response...}}
+        // Extract inner data jika ada
+        const finalData = responseData.data || responseData;
+        
         // Handle response similar to WebSocket
-        handlePaymentResponse(responseData);
+        handlePaymentResponse(finalData);
         
         // Clear cart on success
-        if (responseData.rc === '00' || responseData.status?.toLowerCase() === 'success' || responseData.status?.toLowerCase() === 'paid') {
+        if (finalData.rc === '00' || finalData.status?.toLowerCase() === 'success' || finalData.status?.toLowerCase() === 'paid' || finalData.status?.toLowerCase() === 'refund') {
             clearCart();
         }
         
     } catch (error) {
+        // User-initiated manual retry → suppress error UI, retry handler sudah jalan
+        if (error && error.message === '__USER_RETRY__') {
+            return;
+        }
         log(`API Payment error: ${error.message}`, 'error');
         showToast('Error', error.message, 'error');
         
@@ -1605,16 +2307,157 @@ async function retryTransactionViaFMS() {
     }
 }
 
+// ===== Retry Transaction via WebSocket (WS/WSS) =====
+async function retryTransactionViaWS() {
+    if (!state.currentTransaction) {
+        showToast('Error', 'Tidak ada data transaksi untuk di-retry', 'error');
+        return;
+    }
+
+    const { trxId, encryptedToken, payload } = state.currentTransaction;
+    const detailsEl = document.getElementById('paymentDetails');
+    const footerEl = document.getElementById('paymentFooter');
+
+    detailsEl.innerHTML = `
+        <div style="text-align: center; padding: 2rem;">
+            <div class="spinner"></div>
+            <p style="margin-top: 1rem; color: var(--gray-600);">Retry transaksi <strong>${trxId}</strong> via WebSocket...</p>
+        </div>
+    `;
+    footerEl.innerHTML = '';
+
+    // Track retry start time
+    const retryStartTime = new Date();
+    
+    log('========================================', 'info');
+    log(`🔄 RETRY TRANSACTION STARTED`, 'info');
+    log('========================================', 'info');
+    log(`Transaction ID: ${trxId}`, 'info');
+    log(`Retry Start Time: ${retryStartTime.toLocaleTimeString('id-ID', { hour12: false })}`, 'info');
+    log(`Time Since Original: ${((retryStartTime - state.transactionStartTime) / 1000).toFixed(2)}s`, 'info');
+    log('========================================', 'info');
+    log(`🔄 Retrying transaction via WebSocket: ${trxId}`, 'info');
+    log('========================================', 'info');
+
+    try {
+        // Ensure connection
+        if (!state.isConnected) {
+            log('Reconnecting to EDC...', 'info');
+            await connectToEDC();
+        }
+
+        if (!state.isConnected) {
+            throw new Error('Failed to reconnect to EDC');
+        }
+
+        log(`✅ Connection established for retry`, 'success');
+        log(`WebSocket state: ${ecrWs.ws?.readyState === WebSocket.OPEN ? 'OPEN' : 'NOT OPEN'}`, 'info');
+
+        // Resend encrypted token
+        log(`Resending encrypted token for trx_id: ${trxId}`, 'info');
+        const sent = ecrWs.send(encryptedToken);
+        
+        if (!sent) {
+            throw new Error('Failed to resend payment request');
+        }
+
+        log(`✅ Message sent successfully`, 'success');
+
+        // Set timeout for WebSocket response
+        const messageTimeoutMs = state.settings.wsMessageTimeout || 30000;
+        
+        // Clear previous timeout if exists
+        if (state.currentTransactionTimeoutHandler) {
+            clearTimeout(state.currentTransactionTimeoutHandler);
+            log('Cleared previous timeout handler', 'info');
+        }
+
+        const messageTimeoutHandler = setTimeout(() => {
+            log(`⏱️ WebSocket message timeout for retry trx_id: ${trxId}`, 'warning');
+            
+            const statusEl = document.getElementById('paymentStatus');
+            const detailsEl = document.getElementById('paymentDetails');
+            const footerEl = document.getElementById('paymentFooter');
+            
+            if (statusEl && detailsEl && footerEl) {
+                statusEl.style.display = 'none';
+                detailsEl.style.display = 'block';
+                footerEl.style.display = 'flex';
+                
+                detailsEl.innerHTML = `
+                    <div class="payment-result error">
+                        <div class="result-title error">
+                            <i class="fas fa-clock"></i> Retry Timeout
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Transaction ID</span>
+                            <span class="result-value">${trxId}</span>
+                        </div>
+                        <div class="result-item">
+                            <span class="result-label">Error</span>
+                            <span class="result-value" style="color: var(--danger-color);">EDC tidak merespon dalam ${messageTimeoutMs}ms</span>
+                        </div>
+                        <p style="margin-top: 1rem; font-size: 0.875rem; color: var(--gray-600);">
+                            Transaksi mungkin masih diproses di EDC. Coba retry lagi atau tutup modal.
+                        </p>
+                    </div>
+                `;
+                
+                footerEl.innerHTML = `
+                    <button class="btn btn-outline" onclick="closePaymentModal()">Tutup</button>
+                    <button class="btn btn-primary" onclick="retryTransactionViaWS()">
+                        <i class="fas fa-redo"></i> Retry Lagi
+                    </button>
+                `;
+            }
+        }, messageTimeoutMs);
+
+        state.currentTransactionTimeoutHandler = messageTimeoutHandler;
+        log(`⏱️ Message timeout set to ${messageTimeoutMs}ms`, 'info');
+        log('========================================', 'info');
+        log('Waiting for EDC response...', 'info');
+
+    } catch (error) {
+        log(`❌ WebSocket retry error: ${error.message}`, 'error');
+
+        detailsEl.innerHTML = `
+            <div class="payment-result error">
+                <div class="result-title error">
+                    <i class="fas fa-exclamation-triangle"></i> Retry Gagal
+                </div>
+                <div class="result-item">
+                    <span class="result-label">Transaction ID</span>
+                    <span class="result-value">${trxId}</span>
+                </div>
+                <div class="result-item">
+                    <span class="result-label">Error</span>
+                    <span class="result-value" style="color: var(--danger-color);">${error.message}</span>
+                </div>
+            </div>
+        `;
+
+        footerEl.style.display = 'flex';
+        footerEl.innerHTML = `
+            <button class="btn btn-outline" onclick="closePaymentModal()">Tutup</button>
+            <button class="btn btn-primary" onclick="retryTransactionViaWS()">
+                <i class="fas fa-redo"></i> Coba Lagi
+            </button>
+        `;
+    }
+}
+
 // ===== Action Type UI Update =====
 function updateActionTypeUI() {
     const actionType = document.getElementById('actionType')?.value || 'Sale';
     const paymentMethodSection = document.getElementById('paymentMethodSection');
     const cicilanOptions = document.getElementById('cicilanOptions');
+    const refundOptions = document.getElementById('refundOptions');
     
     // Show/hide payment method based on action type
     if (actionType === 'Sale') {
         paymentMethodSection.style.display = 'block';
         cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'none';
         // Show all payment methods
         document.querySelectorAll('input[name="paymentMethod"]').forEach(r => {
             r.closest('.payment-method').style.display = '';
@@ -1622,6 +2465,7 @@ function updateActionTypeUI() {
     } else if (actionType === 'Settlement') {
         paymentMethodSection.style.display = 'block';
         cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'none';
         // Only show purchase and brizzi for settlement
         document.querySelectorAll('input[name="paymentMethod"]').forEach(r => {
             const show = r.value === 'purchase' || r.value === 'brizzi';
@@ -1633,16 +2477,23 @@ function updateActionTypeUI() {
     } else if (actionType === 'QrisTap') {
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'none';
     } else if (actionType === 'Cicilan') {
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'block';
+        refundOptions.style.display = 'none';
+    } else if (actionType === 'RefundQris') {
+        paymentMethodSection.style.display = 'none';
+        cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'block';
     } else {
         // Contactless, CardVerification - only support purchase method
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'none';
     }
     
-    // Update pay button state (Settlement doesn't require cart items)
+    // Update pay button state (Settlement & RefundQris doesn't require cart items)
     updateCartSummary();
     
     // Update pay button label
@@ -1653,6 +2504,9 @@ function updateActionTypeUI() {
     } else if (actionType === 'QrisTap') {
         payBtn.querySelector('span').textContent = 'Bayar via QRIS TAP';
         payBtn.querySelector('i').className = 'fas fa-mobile-alt';
+    } else if (actionType === 'RefundQris') {
+        payBtn.querySelector('span').textContent = 'Refund QRIS';
+        payBtn.querySelector('i').className = 'fas fa-undo';
     } else {
         payBtn.querySelector('span').textContent = 'Bayar Sekarang';
         payBtn.querySelector('i').className = 'fas fa-check-circle';
@@ -1668,6 +2522,14 @@ function saveSettingsToState() {
     state.settings.posAddress = document.getElementById('posAddress')?.value || '172.0.0.1';
     state.settings.secretKey = document.getElementById('secretKey')?.value || 'ECR2022secretKey';
     state.settings.actionType = document.getElementById('defaultActionType')?.value || 'Sale';
+    
+    // WebSocket Timeout Settings
+    state.settings.wsConnectionTimeout = parseInt(document.getElementById('wsConnectionTimeout')?.value) || 10000;
+    state.settings.wsMessageTimeout = parseInt(document.getElementById('wsMessageTimeout')?.value) || 30000;
+    
+    // WebSocket Disconnect Simulation Settings
+    state.settings.wsDisconnectAfter = parseInt(document.getElementById('wsDisconnectAfter')?.value) || 0;
+    state.settings.wsDisconnectOnSend = document.getElementById('wsDisconnectOnSend')?.checked || false;
     
     // API settings
     state.settings.apiUrl = document.getElementById('apiUrl')?.value || 'https://development-ecrlink.pcsindonesia.com';
@@ -1700,6 +2562,14 @@ function loadSettings() {
     document.getElementById('posAddress').value = state.settings.posAddress;
     document.getElementById('secretKey').value = state.settings.secretKey;
     document.getElementById('defaultActionType').value = state.settings.actionType;
+    
+    // WebSocket Timeout Settings
+    document.getElementById('wsConnectionTimeout').value = state.settings.wsConnectionTimeout || 10000;
+    document.getElementById('wsMessageTimeout').value = state.settings.wsMessageTimeout || 30000;
+    
+    // WebSocket Disconnect Simulation Settings
+    document.getElementById('wsDisconnectAfter').value = state.settings.wsDisconnectAfter || 0;
+    document.getElementById('wsDisconnectOnSend').checked = state.settings.wsDisconnectOnSend || false;
     
     // API settings
     document.getElementById('apiUrl').value = state.settings.apiUrl || 'https://development-ecrlink.pcsindonesia.com';

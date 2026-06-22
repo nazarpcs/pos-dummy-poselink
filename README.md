@@ -34,6 +34,32 @@ Implementasi berdasarkan **Technical Document ECR Link FMS BRI Version 4.9.0**
 | WS | `ws://{edc_ip}:{port}` | 6745 |
 | WSS | `wss://{edc_ip}:{port}` | 6746 |
 
+### WebSocket Timeout Settings
+
+Aplikasi memiliki timeout configuration untuk menangani koneksi yang lambat atau tidak responsif:
+
+| Setting | Default | Deskripsi |
+|---------|---------|-----------|
+| **Connection Timeout** | 10000 ms (10 detik) | Waktu maksimal untuk establish koneksi WebSocket |
+| **Message Timeout** | 30000 ms (30 detik) | Waktu maksimal menunggu response dari EDC setelah mengirim pesan |
+
+**Cara mengatur timeout (via Console):**
+```javascript
+// Set connection timeout ke 15 detik
+ecrWs.setConnectionTimeout(15000);
+
+// Set message timeout ke 45 detik
+ecrWs.setMessageTimeout(45000);
+
+// Lihat setting timeout saat ini
+console.log(ecrWs.getTimeoutSettings());
+```
+
+**Kapan perlu mengubah timeout:**
+- **Jaringan lambat**: Naikkan timeout (misal 15000-20000 ms)
+- **EDC responsif cepat**: Turunkan timeout (misal 5000-8000 ms)
+- **Testing**: Gunakan default untuk hasil optimal
+
 ### Payload Structure
 
 #### Sale (Purchase/Brizzi/QRIS)
