@@ -617,6 +617,22 @@ const PayloadBuilder = {
     },
 
     /**
+     * Build Refund QRIS payload
+     * action: "Refund Qris"
+     * method: "qris"
+     * Berdasarkan dokumentasi POSe Link v4.13.0 section 4.9
+     */
+    buildRefundQris(amount, reffId) {
+        return {
+            action: 'Refund Qris',
+            reff_id: reffId,
+            pos_address: state.settings.posAddress,
+            time_stamp: this.getTimestamp(),
+            method: 'qris'
+        };
+    },
+
+    /**
      * Build QRIS TAP payload
      * action: "Sale"
      * method: "qris_tap"
@@ -861,55 +877,137 @@ async function testAPIConnection() {
     log(`MID: ${state.settings.mid}`, 'info');
     log(`TID: ${state.settings.tid}`, 'info');
     log('', 'info');
-    
+
+    // ── Step 1: Health check middleware ──────────────────────────────────────
+    log('📡 Step 1: Checking middleware health...', 'info');
+    let middlewareOk = false;
     try {
-        // Test API endpoint with a simple request
+        const healthUrl = `${state.settings.apiUrl}/health`;
+        const healthRes = await fetch(healthUrl, {
+            method: 'GET',
+            mode: 'cors',
+            headers: { 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(5000)
+        });
+        const healthData = await healthRes.json().catch(() => ({}));
+        if (healthRes.ok && (healthData.status?.toLowerCase() === 'healthy' || healthData.status?.toLowerCase() === 'ok')) {
+            log(`✅ Middleware healthy: ${JSON.stringify(healthData)}`, 'success');
+            middlewareOk = true;
+        } else {
+            log(`⚠️ Middleware health check: HTTP ${healthRes.status} - ${JSON.stringify(healthData)}`, 'warning');
+            middlewareOk = true; // server reachable meskipun status tidak "healthy"
+        }
+    } catch (e) {
+        log(`❌ Middleware tidak dapat dijangkau: ${e.message}`, 'error');
+        log(`   Pastikan POS terhubung ke internet dan URL middleware benar`, 'info');
+    }
+
+    // ── Step 2: Validate MID/TID terdaftar di middleware ─────────────────────
+    log('', 'info');
+    log('🔑 Step 2: Validating MID/TID ke middleware...', 'info');
+    try {
         const apiUrl = `${state.settings.apiUrl}/api/v1/transaction`;
-        log(`Testing endpoint: ${apiUrl}`, 'info');
-        
-        // Try a test request (will fail with 400 but that's expected)
         const response = await fetch(apiUrl, {
             method: 'POST',
             mode: 'cors',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-            },
-            body: JSON.stringify({ test: true })
-        }).catch(err => {
-            if (err.name === 'TypeError' && err.message.includes('fetch')) {
-                throw new Error(`Cannot connect to API server. Please ensure:
-1. Middleware API is running at ${state.settings.apiUrl}
-2. If using localhost, ensure API and POS are on same origin
-3. Check API_CONTRACT.md for setup instructions`);
-            }
-            throw err;
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ test: true }),
+            signal: AbortSignal.timeout(8000)
         });
-        
-        if (response.status === 400) {
-            log(`✅ API server is running and reachable!`, 'success');
-            log(`   Note: 400 Bad Request is expected for test payload`, 'info');
-            showToast('Success', 'API server is reachable', 'success');
+        const testBody = await response.json().catch(() => ({}));
+        const errMsg = testBody?.error || '';
+        const isValidationError = errMsg.toLowerCase().includes('required') ||
+                                  errMsg.toLowerCase().includes('token') ||
+                                  errMsg.toLowerCase().includes('transaction_id') ||
+                                  errMsg.toLowerCase().includes('mid') ||
+                                  errMsg.toLowerCase().includes('tid');
+        if ((response.status === 400) && isValidationError) {
+            log(`✅ Endpoint transaction OK (validation error expected): "${errMsg}"`, 'success');
+        } else if (errMsg.toLowerCase().includes('unknown mid') || errMsg.toLowerCase().includes('unknown tid')) {
+            log(`❌ MID/TID tidak terdaftar di middleware: "${errMsg}"`, 'error');
         } else if (response.ok) {
-            log(`✅ API connection successful (Status: ${response.status})`, 'success');
-            showToast('Success', 'API connection test successful', 'success');
+            log(`✅ Endpoint transaction OK (HTTP ${response.status})`, 'success');
         } else {
-            log(`⚠️ API returned status: ${response.status}`, 'warning');
+            log(`⚠️ Endpoint transaction: HTTP ${response.status} - ${errMsg}`, 'warning');
         }
-        
-    } catch (error) {
-        log(`❌ API connection failed:`, 'error');
-        log(`   ${error.message}`, 'error');
-        log('', 'info');
-        log('💡 Troubleshooting:', 'info');
-        log('   1. Ensure middleware is running on the API URL', 'info');
-        log('   2. Check firewall/antivirus is not blocking the connection', 'info');
-        log('   3. If API is on different origin, ensure CORS is enabled', 'info');
-        log('   4. Try accessing API directly via curl/Postman first', 'info');
-        showToast('Error', 'API connection failed. Check Activity Log for details.', 'error');
+    } catch (e) {
+        log(`❌ Endpoint transaction tidak dapat dijangkau: ${e.message}`, 'error');
     }
-    
+
+    // ── Step 3: WebSocket handshake ke EDC (jika IP EDC diisi) ───────────────
+    log('', 'info');
+    log('📶 Step 3: WebSocket handshake ke EDC...', 'info');
+    const edcIp = state.settings.edcIp;
+    if (!edcIp) {
+        log('⚠️ EDC IP tidak diisi — skip WebSocket handshake test', 'warning');
+        log('   (Mode API tidak membutuhkan koneksi langsung ke EDC, tapi tes ini', 'info');
+        log('    berguna untuk memastikan POS dan EDC berada di jaringan yang sama)', 'info');
+    } else {
+        const wsPort = state.settings.edcPort || '6746';
+        const wsProto = state.settings.connectionType === 'wss' ? 'wss' : 'ws';
+        const wsUrl = `${wsProto}://${edcIp}:${wsPort}`;
+        log(`   Mencoba handshake ke: ${wsUrl}`, 'info');
+        await testWebSocketHandshake(wsUrl);
+    }
+
+    log('', 'info');
     log('========================================', 'info');
+    log('🔌 TEST CONNECTION SELESAI', 'info');
+    log('========================================', 'info');
+    showToast('Info', 'Test connection selesai. Cek Activity Log untuk detail.', 'info');
+}
+
+/**
+ * Lakukan WebSocket handshake ke EDC, timeout 8 detik.
+ * Hanya cek apakah koneksi bisa dibuka (POS & EDC satu jaringan).
+ */
+function testWebSocketHandshake(wsUrl) {
+    return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+            log(`❌ WebSocket handshake timeout (8s) ke ${wsUrl}`, 'error');
+            log(`   EDC tidak dapat dijangkau. Kemungkinan:`, 'info');
+            log(`   1. POS dan EDC tidak dalam jaringan yang sama`, 'info');
+            log(`   2. IP/Port EDC salah`, 'info');
+            log(`   3. ECR Link belum aktif di EDC`, 'info');
+            try { ws.close(); } catch(_) {}
+            resolve();
+        }, 8000);
+
+        let ws;
+        try {
+            ws = new WebSocket(wsUrl);
+        } catch (e) {
+            clearTimeout(timeout);
+            log(`❌ Tidak bisa membuat koneksi WebSocket: ${e.message}`, 'error');
+            resolve();
+            return;
+        }
+
+        ws.onopen = () => {
+            clearTimeout(timeout);
+            log(`✅ WebSocket handshake BERHASIL ke ${wsUrl}`, 'success');
+            log(`   POS dan EDC berada dalam jaringan yang sama ✅`, 'success');
+            ws.close();
+            resolve();
+        };
+
+        ws.onerror = (e) => {
+            clearTimeout(timeout);
+            log(`❌ WebSocket handshake GAGAL ke ${wsUrl}`, 'error');
+            log(`   POS dan EDC kemungkinan TIDAK dalam jaringan yang sama`, 'error');
+            log(`   Atau ECR Link di EDC belum aktif / port salah`, 'info');
+            resolve();
+        };
+
+        ws.onclose = (e) => {
+            clearTimeout(timeout);
+            if (e.code === 1000 || e.code === 1001) return resolve();
+            if (e.code === 1006) {
+                log(`❌ WebSocket closed abnormally (code 1006) — EDC tidak support ${wsUrl.startsWith('wss') ? 'WSS' : 'WS'} atau tidak reachable`, 'error');
+            }
+            resolve();
+        };
+    });
 }
 
 /**
@@ -1139,15 +1237,15 @@ function updateCartSummary() {
     
     // Enable/disable pay button
     const actionType = document.getElementById('actionType')?.value || 'Sale';
-    document.getElementById('payBtn').disabled = actionType !== 'Settlement' && state.cart.length === 0;
+    document.getElementById('payBtn').disabled = actionType !== 'Settlement' && actionType !== 'RefundQris' && state.cart.length === 0;
 }
 
 // ===== Payment Processing =====
 async function processPayment() {
     const actionType = document.getElementById('actionType')?.value || 'Sale';
     
-    // Settlement doesn't require cart items
-    if (actionType !== 'Settlement' && state.cart.length === 0) {
+    // Settlement and RefundQris don't require cart items
+    if (actionType !== 'Settlement' && actionType !== 'RefundQris' && state.cart.length === 0) {
         showToast('Error', 'Cart is empty', 'error');
         return;
     }
@@ -1216,6 +1314,13 @@ async function processPayment() {
                 break;
             case 'QrisTap':
                 payload = PayloadBuilder.buildQrisTap(total);
+                break;
+            case 'RefundQris':
+                const refundRef = document.getElementById('refundReferenceNumber')?.value?.trim();
+                if (!refundRef) {
+                    throw new Error('Reff ID wajib diisi untuk Refund QRIS');
+                }
+                payload = PayloadBuilder.buildRefundQris(total, refundRef);
                 break;
             default:
                 payload = PayloadBuilder.buildSale(total, paymentMethod);
@@ -1415,19 +1520,36 @@ function handlePaymentResponse(response) {
     state.totalTransactions++;
     updateInfoPanel();
     
-    // Check if it's a success response (rc: "00" or status: "success"/"paid")
+    // Check if it's a success response (rc: "00" or status: "success"/"paid"/"refund")
     const isSuccess = response.rc === '00' || 
                       response.status?.toLowerCase() === 'success' || 
                       response.status?.toLowerCase() === 'paid' ||
+                      response.status?.toLowerCase() === 'refund' ||
                       response.success === true;
     
-    log(`Is Success: ${isSuccess}`, 'info');
+    // Unpaid is not a failure, it's a warning state (QRIS belum dibayar)
+    const isUnpaid = response.status?.toLowerCase() === 'unpaid';
+    
+    log(`Is Success: ${isSuccess}, Is Unpaid: ${isUnpaid}`, 'info');
     log(`RC: ${response.rc}, Status: ${response.status}`, 'info');
     
-    const titleClass = isSuccess ? 'success' : 'error';
-    const titleIcon = isSuccess ? 'fa-check-circle' : 'fa-times-circle';
-    const titleText = isSuccess ? 'Transaction Success' : 'Transaction Failed';
-    const statusColor = isSuccess ? 'var(--success-color)' : 'var(--danger-color)';
+    let titleClass, titleIcon, titleText, statusColor;
+    if (isSuccess) {
+        titleClass = 'success';
+        titleIcon = 'fa-check-circle';
+        titleText = 'Transaction Success';
+        statusColor = 'var(--success-color)';
+    } else if (isUnpaid) {
+        titleClass = 'error';
+        titleIcon = 'fa-exclamation-circle';
+        titleText = 'QRIS Unpaid';
+        statusColor = 'var(--warning-color, #f59e0b)';
+    } else {
+        titleClass = 'error';
+        titleIcon = 'fa-times-circle';
+        titleText = 'Transaction Failed';
+        statusColor = 'var(--danger-color)';
+    }
 
     let resultHtml = `
         <div class="payment-result ${titleClass}">
@@ -1677,12 +1799,17 @@ function startStatusPolling(trxId, intervalMs = 2000) {
                 headers: { 'Accept': 'application/json' }
             });
             const data = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                log(`Poll status HTTP ${res.status}: ${data.error || ''}`, 'warning');
-                return;
-            }
+            
+            // Extract inner transaction data (middleware wraps: {status: "...", data: {...}})
             const txnData = data.data || data;
             const statusLower = String(txnData?.status || '').toLowerCase();
+            
+            // Kalau HTTP error DAN tidak ada data transaksi berguna, skip
+            if (!res.ok && !txnData?.action && !txnData?.rc && !txnData?.trx_id) {
+                log(`Poll status HTTP ${res.status}: ${data.error || JSON.stringify(data).substring(0, 100)}`, 'warning');
+                return;
+            }
+            
             const isStillPending = statusLower === 'pending' || txnData?.pending === true;
             if (isStillPending) {
                 log(`Poll: masih PENDING (trx_id=${trxId})`, 'info');
@@ -1768,6 +1895,13 @@ async function processPaymentViaAPI() {
             case 'QrisTap':
                 payload = PayloadBuilder.buildQrisTap(total);
                 break;
+            case 'RefundQris':
+                const refundRefApi = document.getElementById('refundReferenceNumber')?.value?.trim();
+                if (!refundRefApi) {
+                    throw new Error('Reff ID wajib diisi untuk Refund QRIS');
+                }
+                payload = PayloadBuilder.buildRefundQris(total, refundRefApi);
+                break;
             default:
                 payload = PayloadBuilder.buildSale(total, paymentMethod);
         }
@@ -1799,7 +1933,7 @@ async function processPaymentViaAPI() {
             token: encryptedToken,
             mid: state.settings.mid,
             tid: state.settings.tid,
-            trx_id: payload.trx_id
+            trx_id: payload.trx_id || PayloadBuilder.generateTrxId()
         };
         
         // Store for retry/re-push capability
@@ -1920,11 +2054,15 @@ Check browser DevTools (F12) → Console → look for CORS errors.`);
         
         log(`API Response received: ${JSON.stringify(responseData)}`, 'received');
         
+        // Middleware bisa wrap response: {status: "...", data: {...actual response...}}
+        // Extract inner data jika ada
+        const finalData = responseData.data || responseData;
+        
         // Handle response similar to WebSocket
-        handlePaymentResponse(responseData);
+        handlePaymentResponse(finalData);
         
         // Clear cart on success
-        if (responseData.rc === '00' || responseData.status?.toLowerCase() === 'success' || responseData.status?.toLowerCase() === 'paid') {
+        if (finalData.rc === '00' || finalData.status?.toLowerCase() === 'success' || finalData.status?.toLowerCase() === 'paid' || finalData.status?.toLowerCase() === 'refund') {
             clearCart();
         }
         
@@ -2313,11 +2451,13 @@ function updateActionTypeUI() {
     const actionType = document.getElementById('actionType')?.value || 'Sale';
     const paymentMethodSection = document.getElementById('paymentMethodSection');
     const cicilanOptions = document.getElementById('cicilanOptions');
+    const refundOptions = document.getElementById('refundOptions');
     
     // Show/hide payment method based on action type
     if (actionType === 'Sale') {
         paymentMethodSection.style.display = 'block';
         cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'none';
         // Show all payment methods
         document.querySelectorAll('input[name="paymentMethod"]').forEach(r => {
             r.closest('.payment-method').style.display = '';
@@ -2325,6 +2465,7 @@ function updateActionTypeUI() {
     } else if (actionType === 'Settlement') {
         paymentMethodSection.style.display = 'block';
         cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'none';
         // Only show purchase and brizzi for settlement
         document.querySelectorAll('input[name="paymentMethod"]').forEach(r => {
             const show = r.value === 'purchase' || r.value === 'brizzi';
@@ -2336,16 +2477,23 @@ function updateActionTypeUI() {
     } else if (actionType === 'QrisTap') {
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'none';
     } else if (actionType === 'Cicilan') {
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'block';
+        refundOptions.style.display = 'none';
+    } else if (actionType === 'RefundQris') {
+        paymentMethodSection.style.display = 'none';
+        cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'block';
     } else {
         // Contactless, CardVerification - only support purchase method
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'none';
     }
     
-    // Update pay button state (Settlement doesn't require cart items)
+    // Update pay button state (Settlement & RefundQris doesn't require cart items)
     updateCartSummary();
     
     // Update pay button label
@@ -2356,6 +2504,9 @@ function updateActionTypeUI() {
     } else if (actionType === 'QrisTap') {
         payBtn.querySelector('span').textContent = 'Bayar via QRIS TAP';
         payBtn.querySelector('i').className = 'fas fa-mobile-alt';
+    } else if (actionType === 'RefundQris') {
+        payBtn.querySelector('span').textContent = 'Refund QRIS';
+        payBtn.querySelector('i').className = 'fas fa-undo';
     } else {
         payBtn.querySelector('span').textContent = 'Bayar Sekarang';
         payBtn.querySelector('i').className = 'fas fa-check-circle';

@@ -119,6 +119,7 @@
                                     <option value="Cicilan">Cicilan (Installment)</option>
                                     <option value="Settlement">Settlement (Purchase / Brizzi)</option>
                                     <option value="QrisTap">QRIS TAP</option>
+                                    <option value="RefundQris">Refund QRIS</option>
                                 </select>
                             </div>
                             
@@ -177,6 +178,15 @@
                                             <option value="24">24 Bulan</option>
                                         </select>
                                     </div>
+                                </div>
+                            </div>
+                            
+                            <div id="refundOptions" style="display: none;">
+                                <h3>Refund QRIS</h3>
+                                <div class="form-group" style="margin-bottom: 0.75rem;">
+                                    <label for="refundReferenceNumber">Reff ID (dari struk transaksi QRIS)</label>
+                                    <input type="text" id="refundReferenceNumber" class="form-input" placeholder="Contoh: 2378571437">
+                                    <small class="form-hint">Masukkan reff_id dari struk/response transaksi QRIS yang ingin di-refund</small>
                                 </div>
                             </div>
                             
