@@ -1424,6 +1424,19 @@ async function processPayment() {
 }
 
 function handleMessage(data) {
+    // Known ECR Link handshake/ACK signals — bukan response transaksi, abaikan
+    const ACK_SIGNALS = ['ECR', 'ACK', 'OK', 'CONNECTED'];
+    if (typeof data === 'string' && ACK_SIGNALS.includes(data.trim().toUpperCase())) {
+        log(`📶 ECR handshake/ACK signal diterima: "${data.trim()}" — diabaikan`, 'info');
+        return;
+    }
+
+    // Kalau tidak ada transaksi aktif, abaikan pesan masuk (misal stray message saat reconnect)
+    if (!state.currentTransaction && !state.currentTransactionTimeoutHandler) {
+        log(`⚠️ Pesan diterima tapi tidak ada transaksi aktif, diabaikan: ${data.substring(0, 100)}`, 'warning');
+        return;
+    }
+
     // Clear message timeout when response received
     if (state.currentTransactionTimeoutHandler) {
         clearTimeout(state.currentTransactionTimeoutHandler);
@@ -1444,13 +1457,9 @@ function handleMessage(data) {
         log(`Response Status: ${response.status || 'N/A'}`, 'info');
         handlePaymentResponse(response);
     } catch (error) {
-        // If not JSON, treat as raw response
-        log(`⚠️ Raw response received (not JSON): ${data.substring(0, 200)}`, 'warning');
+        // Non-JSON yang bukan ACK → log sebagai warning, jangan treat sebagai sukses
+        log(`⚠️ Raw response tidak dikenal (bukan JSON, bukan ACK): ${data.substring(0, 200)}`, 'warning');
         log(`Parse error: ${error.message}`, 'warning');
-        handlePaymentResponse({
-            success: true,
-            raw: data
-        });
     }
 }
 
@@ -1516,6 +1525,9 @@ function handlePaymentResponse(response) {
     statusEl.style.display = 'none';
     detailsEl.style.display = 'block';
     footerEl.style.display = 'flex';
+    
+    // Clear current transaction — response final sudah diterima
+    state.currentTransaction = null;
     
     state.totalTransactions++;
     updateInfoPanel();
