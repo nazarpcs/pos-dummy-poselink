@@ -1765,9 +1765,15 @@ function showPendingStatus({ message, detail, timeoutMs, onRetry }) {
         if (remaining <= 0) {
             el.textContent = '00:00';
             el.style.color = 'var(--danger-color, #dc2626)';
+            // Sembunyikan spinner saat timeout
+            const spinnerEl = statusEl.querySelector('.spinner');
+            if (spinnerEl) spinnerEl.style.display = 'none';
             const msgEl = statusEl.querySelector('.status-message');
             const detailEl = statusEl.querySelector('.status-detail');
-            if (msgEl) msgEl.textContent = 'Timeout';
+            if (msgEl) {
+                msgEl.textContent = 'Timeout';
+                msgEl.style.color = 'var(--danger-color, #dc2626)';
+            }
             if (detailEl) detailEl.textContent = 'EDC tidak merespon dalam waktu yang ditentukan';
             const btn = document.getElementById('pendingRetryBtn');
             if (btn) {
