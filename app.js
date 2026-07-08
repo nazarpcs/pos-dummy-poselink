@@ -65,6 +65,7 @@ const state = {
     userRequestedRetry: false,
     statusPollInterval: null,
     statusPollInFlight: false,
+    lastWsTransaction: null,
     
     // Logs
     logs: []
@@ -1358,6 +1359,8 @@ async function processPayment() {
             encryptedToken: encryptedToken,
             payload: payload
         };
+        // Simpan juga ke lastWsTransaction agar retry tetap bisa diakses setelah currentTransaction di-clear
+        state.lastWsTransaction = { ...state.currentTransaction };
         
         // Send as raw encrypted string (token only)
         const sent = ecrWs.send(encryptedToken);
@@ -2327,9 +2330,15 @@ async function retryTransactionViaFMS() {
 
 // ===== Retry Transaction via WebSocket (WS/WSS) =====
 async function retryTransactionViaWS() {
-    if (!state.currentTransaction) {
+    // Gunakan currentTransaction atau fallback ke lastWsTransaction
+    const txn = state.currentTransaction || state.lastWsTransaction;
+    if (!txn) {
         showToast('Error', 'Tidak ada data transaksi untuk di-retry', 'error');
         return;
+    }
+    // Pastikan currentTransaction terisi untuk retry
+    if (!state.currentTransaction) {
+        state.currentTransaction = { ...txn };
     }
 
     const { trxId, encryptedToken, payload } = state.currentTransaction;
