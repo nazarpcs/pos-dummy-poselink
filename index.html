@@ -120,6 +120,8 @@
                                     <option value="Settlement">Settlement (Purchase / Brizzi)</option>
                                     <option value="QrisTap">QRIS TAP</option>
                                     <option value="RefundQris">Refund QRIS</option>
+                                    <option value="CheckStatusQR">Check Status QR</option>
+                                    <option value="CheckStatusTrx">Check Status Transaksi</option>
                                 </select>
                             </div>
                             
@@ -187,6 +189,24 @@
                                     <label for="refundReferenceNumber">Reff ID (dari struk transaksi QRIS)</label>
                                     <input type="text" id="refundReferenceNumber" class="form-input" placeholder="Contoh: 2378571437">
                                     <small class="form-hint">Masukkan reff_id dari struk/response transaksi QRIS yang ingin di-refund</small>
+                                </div>
+                            </div>
+                            
+                            <div id="checkStatusQROptions" style="display: none;">
+                                <h3>Check Status QR</h3>
+                                <div class="form-group" style="margin-bottom: 0.75rem;">
+                                    <label for="checkStatusRefNumber">Reference Number</label>
+                                    <input type="text" id="checkStatusRefNumber" class="form-input" placeholder="Contoh: 2378571437">
+                                    <small class="form-hint">Masukkan reference_number dari struk/response transaksi QRIS sebelumnya</small>
+                                </div>
+                            </div>
+                            
+                            <div id="checkStatusTrxOptions" style="display: none;">
+                                <h3>Check Status Transaksi</h3>
+                                <div class="form-group" style="margin-bottom: 0.75rem;">
+                                    <label for="checkStatusTrxId">Transaction ID</label>
+                                    <input type="text" id="checkStatusTrxId" class="form-input" placeholder="Contoh: TRX-20250101-ABC123">
+                                    <small class="form-hint">Masukkan trx_id dari transaksi yang ingin dicek statusnya via Middleware</small>
                                 </div>
                             </div>
                             
