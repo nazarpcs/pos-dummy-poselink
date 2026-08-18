@@ -1238,16 +1238,28 @@ function updateCartSummary() {
     
     // Enable/disable pay button
     const actionType = document.getElementById('actionType')?.value || 'Sale';
-    document.getElementById('payBtn').disabled = actionType !== 'Settlement' && actionType !== 'RefundQris' && state.cart.length === 0;
+    document.getElementById('payBtn').disabled = actionType !== 'Settlement' && actionType !== 'RefundQris' && actionType !== 'CheckStatusQR' && actionType !== 'CheckStatusTrx' && state.cart.length === 0;
 }
 
 // ===== Payment Processing =====
 async function processPayment() {
     const actionType = document.getElementById('actionType')?.value || 'Sale';
     
-    // Settlement and RefundQris don't require cart items
-    if (actionType !== 'Settlement' && actionType !== 'RefundQris' && state.cart.length === 0) {
+    // Settlement, RefundQris, CheckStatusQR, CheckStatusTrx don't require cart items
+    if (actionType !== 'Settlement' && actionType !== 'RefundQris' && actionType !== 'CheckStatusQR' && actionType !== 'CheckStatusTrx' && state.cart.length === 0) {
         showToast('Error', 'Cart is empty', 'error');
+        return;
+    }
+    
+    // CheckStatusTrx uses middleware API directly, not WebSocket
+    if (actionType === 'CheckStatusTrx') {
+        const trxId = document.getElementById('checkStatusTrxId')?.value?.trim();
+        if (!trxId) {
+            showToast('Error', 'Transaction ID wajib diisi', 'error');
+            return;
+        }
+        showPaymentModal();
+        await checkTransactionStatus(trxId);
         return;
     }
     
@@ -1322,6 +1334,13 @@ async function processPayment() {
                     throw new Error('Reff ID wajib diisi untuk Refund QRIS');
                 }
                 payload = PayloadBuilder.buildRefundQris(total, refundRef);
+                break;
+            case 'CheckStatusQR':
+                const checkStatusRef = document.getElementById('checkStatusRefNumber')?.value?.trim();
+                if (!checkStatusRef) {
+                    throw new Error('Reference Number wajib diisi untuk Check Status QR');
+                }
+                payload = PayloadBuilder.buildCheckStatus(checkStatusRef);
                 break;
             default:
                 payload = PayloadBuilder.buildSale(total, paymentMethod);
@@ -1923,6 +1942,13 @@ async function processPaymentViaAPI() {
                 }
                 payload = PayloadBuilder.buildRefundQris(total, refundRefApi);
                 break;
+            case 'CheckStatusQR':
+                const checkStatusRefApi = document.getElementById('checkStatusRefNumber')?.value?.trim();
+                if (!checkStatusRefApi) {
+                    throw new Error('Reference Number wajib diisi untuk Check Status QR');
+                }
+                payload = PayloadBuilder.buildCheckStatus(checkStatusRefApi);
+                break;
             default:
                 payload = PayloadBuilder.buildSale(total, paymentMethod);
         }
@@ -2479,12 +2505,16 @@ function updateActionTypeUI() {
     const paymentMethodSection = document.getElementById('paymentMethodSection');
     const cicilanOptions = document.getElementById('cicilanOptions');
     const refundOptions = document.getElementById('refundOptions');
+    const checkStatusQROptions = document.getElementById('checkStatusQROptions');
+    const checkStatusTrxOptions = document.getElementById('checkStatusTrxOptions');
     
     // Show/hide payment method based on action type
     if (actionType === 'Sale') {
         paymentMethodSection.style.display = 'block';
         cicilanOptions.style.display = 'none';
         refundOptions.style.display = 'none';
+        checkStatusQROptions.style.display = 'none';
+        checkStatusTrxOptions.style.display = 'none';
         // Show all payment methods
         document.querySelectorAll('input[name="paymentMethod"]').forEach(r => {
             r.closest('.payment-method').style.display = '';
@@ -2493,6 +2523,8 @@ function updateActionTypeUI() {
         paymentMethodSection.style.display = 'block';
         cicilanOptions.style.display = 'none';
         refundOptions.style.display = 'none';
+        checkStatusQROptions.style.display = 'none';
+        checkStatusTrxOptions.style.display = 'none';
         // Only show purchase and brizzi for settlement
         document.querySelectorAll('input[name="paymentMethod"]').forEach(r => {
             const show = r.value === 'purchase' || r.value === 'brizzi';
@@ -2505,19 +2537,39 @@ function updateActionTypeUI() {
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'none';
         refundOptions.style.display = 'none';
+        checkStatusQROptions.style.display = 'none';
+        checkStatusTrxOptions.style.display = 'none';
     } else if (actionType === 'Cicilan') {
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'block';
         refundOptions.style.display = 'none';
+        checkStatusQROptions.style.display = 'none';
+        checkStatusTrxOptions.style.display = 'none';
     } else if (actionType === 'RefundQris') {
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'none';
         refundOptions.style.display = 'block';
+        checkStatusQROptions.style.display = 'none';
+        checkStatusTrxOptions.style.display = 'none';
+    } else if (actionType === 'CheckStatusQR') {
+        paymentMethodSection.style.display = 'none';
+        cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'none';
+        checkStatusQROptions.style.display = 'block';
+        checkStatusTrxOptions.style.display = 'none';
+    } else if (actionType === 'CheckStatusTrx') {
+        paymentMethodSection.style.display = 'none';
+        cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'none';
+        checkStatusQROptions.style.display = 'none';
+        checkStatusTrxOptions.style.display = 'block';
     } else {
         // Contactless, CardVerification - only support purchase method
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'none';
         refundOptions.style.display = 'none';
+        checkStatusQROptions.style.display = 'none';
+        checkStatusTrxOptions.style.display = 'none';
     }
     
     // Update pay button state (Settlement & RefundQris doesn't require cart items)
@@ -2534,6 +2586,12 @@ function updateActionTypeUI() {
     } else if (actionType === 'RefundQris') {
         payBtn.querySelector('span').textContent = 'Refund QRIS';
         payBtn.querySelector('i').className = 'fas fa-undo';
+    } else if (actionType === 'CheckStatusQR') {
+        payBtn.querySelector('span').textContent = 'Cek Status QR';
+        payBtn.querySelector('i').className = 'fas fa-search';
+    } else if (actionType === 'CheckStatusTrx') {
+        payBtn.querySelector('span').textContent = 'Cek Status Transaksi';
+        payBtn.querySelector('i').className = 'fas fa-search';
     } else {
         payBtn.querySelector('span').textContent = 'Bayar Sekarang';
         payBtn.querySelector('i').className = 'fas fa-check-circle';
