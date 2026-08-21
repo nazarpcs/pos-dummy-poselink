@@ -2198,13 +2198,29 @@ async function checkTransactionStatus(trxId) {
     log(`Checking transaction status: ${trxId}`, 'info');
     
     try {
-        const apiUrl = `${state.settings.apiUrl}/api/v1/transaction/status/${trxId}`;
-        log(`GET ${apiUrl}`, 'info');
+        // Build Check Status payload and encrypt it (same flow as Sale)
+        const payload = PayloadBuilder.buildCheckStatus(trxId);
+        const encryptedToken = ECREncryption.generateToken(payload);
+        
+        const apiUrl = `${state.settings.apiUrl}/api/v1/transaction`;
+        const requestBody = {
+            token: encryptedToken,
+            mid: state.settings.mid,
+            tid: state.settings.tid,
+            trx_id: trxId
+        };
+        
+        log(`POST ${apiUrl}`, 'info');
+        log(`[DEBUG] Check Status request body: ${JSON.stringify(requestBody).substring(0, 200)}...`, 'info');
         
         const response = await fetch(apiUrl, {
-            method: 'GET',
+            method: 'POST',
             mode: 'cors',
-            headers: { 'Accept': 'application/json' }
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify(requestBody)
         });
         
         const data = await response.json().catch(() => ({}));
