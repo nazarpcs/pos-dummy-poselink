@@ -618,6 +618,20 @@ const PayloadBuilder = {
     },
 
     /**
+     * Build Check Trx payload
+     * action: "Check Trx"
+     * Untuk cek status transaksi berdasarkan trx_id
+     */
+    buildCheckTrx(trxId) {
+        return {
+            action: 'Check Trx',
+            trx_id: trxId,
+            pos_address: state.settings.posAddress,
+            time_stamp: this.getTimestamp()
+        };
+    },
+
+    /**
      * Build Refund QRIS payload
      * action: "Refund Qris"
      * method: "qris"
@@ -2198,8 +2212,8 @@ async function checkTransactionStatus(trxId) {
     log(`Checking transaction status: ${trxId}`, 'info');
     
     try {
-        // Build Check Status payload and encrypt it (same flow as Sale)
-        const payload = PayloadBuilder.buildCheckStatus(trxId);
+        // Build Check Trx payload and encrypt it (same flow as Sale)
+        const payload = PayloadBuilder.buildCheckTrx(trxId);
         const encryptedToken = ECREncryption.generateToken(payload);
         
         const apiUrl = `${state.settings.apiUrl}/api/v1/transaction`;
