@@ -120,6 +120,8 @@
                                     <option value="Settlement">Settlement (Purchase / Brizzi)</option>
                                     <option value="QrisTap">QRIS TAP</option>
                                     <option value="RefundQris">Refund QRIS</option>
+                                    <option value="VoidPurchase">Void Purchase</option>
+                                    <option value="VoidBrizzi">Void Brizzi</option>
                                     <option value="CheckStatusQR">Check Status QR</option>
                                     <option value="CheckStatusTrx">Check Status Transaksi</option>
                                 </select>
@@ -198,6 +200,15 @@
                                     <label for="checkStatusRefNumber">Reference Number</label>
                                     <input type="text" id="checkStatusRefNumber" class="form-input" placeholder="Contoh: 2378571437">
                                     <small class="form-hint">Masukkan reference_number dari struk/response transaksi QRIS sebelumnya</small>
+                                </div>
+                            </div>
+                            
+                            <div id="voidOptions" style="display: none;">
+                                <h3>Void Transaksi</h3>
+                                <div class="form-group" style="margin-bottom: 0.75rem;">
+                                    <label for="voidTraceNumber">Trace Number</label>
+                                    <input type="number" id="voidTraceNumber" class="form-input" placeholder="Contoh: 24">
+                                    <small class="form-hint">Masukkan trace_number dari struk transaksi yang ingin di-void</small>
                                 </div>
                             </div>
                             
