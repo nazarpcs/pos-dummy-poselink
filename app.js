@@ -618,6 +618,35 @@ const PayloadBuilder = {
     },
 
     /**
+     * Build Check Trx payload
+     * action: "Check Trx"
+     * Untuk cek status transaksi berdasarkan trx_id
+     */
+    buildCheckTrx(trxId) {
+        return {
+            action: 'Check Trx',
+            trx_id: trxId,
+            pos_address: state.settings.posAddress,
+            time_stamp: this.getTimestamp()
+        };
+    },
+
+    /**
+     * Build Void payload
+     * action: "Void"
+     * method: "purchase" atau "brizzi"
+     */
+    buildVoid(traceNumber, method) {
+        return {
+            action: 'Void',
+            trace_number: parseInt(traceNumber),
+            pos_address: state.settings.posAddress,
+            time_stamp: this.getTimestamp(),
+            method: method
+        };
+    },
+
+    /**
      * Build Refund QRIS payload
      * action: "Refund Qris"
      * method: "qris"
@@ -1238,15 +1267,15 @@ function updateCartSummary() {
     
     // Enable/disable pay button
     const actionType = document.getElementById('actionType')?.value || 'Sale';
-    document.getElementById('payBtn').disabled = actionType !== 'Settlement' && actionType !== 'RefundQris' && actionType !== 'CheckStatusQR' && actionType !== 'CheckStatusTrx' && state.cart.length === 0;
+    document.getElementById('payBtn').disabled = actionType !== 'Settlement' && actionType !== 'RefundQris' && actionType !== 'CheckStatusQR' && actionType !== 'CheckStatusTrx' && actionType !== 'VoidPurchase' && actionType !== 'VoidBrizzi' && state.cart.length === 0;
 }
 
 // ===== Payment Processing =====
 async function processPayment() {
     const actionType = document.getElementById('actionType')?.value || 'Sale';
     
-    // Settlement, RefundQris, CheckStatusQR, CheckStatusTrx don't require cart items
-    if (actionType !== 'Settlement' && actionType !== 'RefundQris' && actionType !== 'CheckStatusQR' && actionType !== 'CheckStatusTrx' && state.cart.length === 0) {
+    // Settlement, RefundQris, CheckStatusQR, CheckStatusTrx, Void don't require cart items
+    if (actionType !== 'Settlement' && actionType !== 'RefundQris' && actionType !== 'CheckStatusQR' && actionType !== 'CheckStatusTrx' && actionType !== 'VoidPurchase' && actionType !== 'VoidBrizzi' && state.cart.length === 0) {
         showToast('Error', 'Cart is empty', 'error');
         return;
     }
@@ -1341,6 +1370,20 @@ async function processPayment() {
                     throw new Error('Reference Number wajib diisi untuk Check Status QR');
                 }
                 payload = PayloadBuilder.buildCheckStatus(checkStatusRef);
+                break;
+            case 'VoidPurchase':
+                const voidTraceP = document.getElementById('voidTraceNumber')?.value?.trim();
+                if (!voidTraceP) {
+                    throw new Error('Trace Number wajib diisi untuk Void');
+                }
+                payload = PayloadBuilder.buildVoid(voidTraceP, 'purchase');
+                break;
+            case 'VoidBrizzi':
+                const voidTraceB = document.getElementById('voidTraceNumber')?.value?.trim();
+                if (!voidTraceB) {
+                    throw new Error('Trace Number wajib diisi untuk Void');
+                }
+                payload = PayloadBuilder.buildVoid(voidTraceB, 'brizzi');
                 break;
             default:
                 payload = PayloadBuilder.buildSale(total, paymentMethod);
@@ -1949,6 +1992,20 @@ async function processPaymentViaAPI() {
                 }
                 payload = PayloadBuilder.buildCheckStatus(checkStatusRefApi);
                 break;
+            case 'VoidPurchase':
+                const voidTracePApi = document.getElementById('voidTraceNumber')?.value?.trim();
+                if (!voidTracePApi) {
+                    throw new Error('Trace Number wajib diisi untuk Void');
+                }
+                payload = PayloadBuilder.buildVoid(voidTracePApi, 'purchase');
+                break;
+            case 'VoidBrizzi':
+                const voidTraceBApi = document.getElementById('voidTraceNumber')?.value?.trim();
+                if (!voidTraceBApi) {
+                    throw new Error('Trace Number wajib diisi untuk Void');
+                }
+                payload = PayloadBuilder.buildVoid(voidTraceBApi, 'brizzi');
+                break;
             default:
                 payload = PayloadBuilder.buildSale(total, paymentMethod);
         }
@@ -2198,13 +2255,29 @@ async function checkTransactionStatus(trxId) {
     log(`Checking transaction status: ${trxId}`, 'info');
     
     try {
-        const apiUrl = `${state.settings.apiUrl}/api/v1/transaction/status/${trxId}`;
-        log(`GET ${apiUrl}`, 'info');
+        // Build Check Trx payload and encrypt it (same flow as Sale)
+        const payload = PayloadBuilder.buildCheckTrx(trxId);
+        const encryptedToken = ECREncryption.generateToken(payload);
+        
+        const apiUrl = `${state.settings.apiUrl}/api/v1/transaction`;
+        const requestBody = {
+            token: encryptedToken,
+            mid: state.settings.mid,
+            tid: state.settings.tid,
+            trx_id: trxId
+        };
+        
+        log(`POST ${apiUrl}`, 'info');
+        log(`[DEBUG] Check Status request body: ${JSON.stringify(requestBody).substring(0, 200)}...`, 'info');
         
         const response = await fetch(apiUrl, {
-            method: 'GET',
+            method: 'POST',
             mode: 'cors',
-            headers: { 'Accept': 'application/json' }
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify(requestBody)
         });
         
         const data = await response.json().catch(() => ({}));
@@ -2507,6 +2580,7 @@ function updateActionTypeUI() {
     const refundOptions = document.getElementById('refundOptions');
     const checkStatusQROptions = document.getElementById('checkStatusQROptions');
     const checkStatusTrxOptions = document.getElementById('checkStatusTrxOptions');
+    const voidOptions = document.getElementById('voidOptions');
     
     // Show/hide payment method based on action type
     if (actionType === 'Sale') {
@@ -2515,6 +2589,7 @@ function updateActionTypeUI() {
         refundOptions.style.display = 'none';
         checkStatusQROptions.style.display = 'none';
         checkStatusTrxOptions.style.display = 'none';
+        voidOptions.style.display = 'none';
         // Show all payment methods
         document.querySelectorAll('input[name="paymentMethod"]').forEach(r => {
             r.closest('.payment-method').style.display = '';
@@ -2525,6 +2600,7 @@ function updateActionTypeUI() {
         refundOptions.style.display = 'none';
         checkStatusQROptions.style.display = 'none';
         checkStatusTrxOptions.style.display = 'none';
+        voidOptions.style.display = 'none';
         // Only show purchase and brizzi for settlement
         document.querySelectorAll('input[name="paymentMethod"]').forEach(r => {
             const show = r.value === 'purchase' || r.value === 'brizzi';
@@ -2539,30 +2615,42 @@ function updateActionTypeUI() {
         refundOptions.style.display = 'none';
         checkStatusQROptions.style.display = 'none';
         checkStatusTrxOptions.style.display = 'none';
+        voidOptions.style.display = 'none';
     } else if (actionType === 'Cicilan') {
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'block';
         refundOptions.style.display = 'none';
         checkStatusQROptions.style.display = 'none';
         checkStatusTrxOptions.style.display = 'none';
+        voidOptions.style.display = 'none';
     } else if (actionType === 'RefundQris') {
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'none';
         refundOptions.style.display = 'block';
         checkStatusQROptions.style.display = 'none';
         checkStatusTrxOptions.style.display = 'none';
+        voidOptions.style.display = 'none';
     } else if (actionType === 'CheckStatusQR') {
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'none';
         refundOptions.style.display = 'none';
         checkStatusQROptions.style.display = 'block';
         checkStatusTrxOptions.style.display = 'none';
+        voidOptions.style.display = 'none';
     } else if (actionType === 'CheckStatusTrx') {
         paymentMethodSection.style.display = 'none';
         cicilanOptions.style.display = 'none';
         refundOptions.style.display = 'none';
         checkStatusQROptions.style.display = 'none';
         checkStatusTrxOptions.style.display = 'block';
+        voidOptions.style.display = 'none';
+    } else if (actionType === 'VoidPurchase' || actionType === 'VoidBrizzi') {
+        paymentMethodSection.style.display = 'none';
+        cicilanOptions.style.display = 'none';
+        refundOptions.style.display = 'none';
+        checkStatusQROptions.style.display = 'none';
+        checkStatusTrxOptions.style.display = 'none';
+        voidOptions.style.display = 'block';
     } else {
         // Contactless, CardVerification - only support purchase method
         paymentMethodSection.style.display = 'none';
@@ -2570,6 +2658,7 @@ function updateActionTypeUI() {
         refundOptions.style.display = 'none';
         checkStatusQROptions.style.display = 'none';
         checkStatusTrxOptions.style.display = 'none';
+        voidOptions.style.display = 'none';
     }
     
     // Update pay button state (Settlement & RefundQris doesn't require cart items)
@@ -2592,6 +2681,12 @@ function updateActionTypeUI() {
     } else if (actionType === 'CheckStatusTrx') {
         payBtn.querySelector('span').textContent = 'Cek Status Transaksi';
         payBtn.querySelector('i').className = 'fas fa-search';
+    } else if (actionType === 'VoidPurchase') {
+        payBtn.querySelector('span').textContent = 'Void Purchase';
+        payBtn.querySelector('i').className = 'fas fa-ban';
+    } else if (actionType === 'VoidBrizzi') {
+        payBtn.querySelector('span').textContent = 'Void Brizzi';
+        payBtn.querySelector('i').className = 'fas fa-ban';
     } else {
         payBtn.querySelector('span').textContent = 'Bayar Sekarang';
         payBtn.querySelector('i').className = 'fas fa-check-circle';
