@@ -34,6 +34,7 @@ const state = {
         apiTimeout: 60,  // POS-side timeout in seconds for API mode
         mid: '',
         tid: '',
+        serialNumber: '',  // Serial Number EDC device (dikirim sbg serial_number di luar token)
         // WebSocket timeout settings
         wsConnectionTimeout: 10000,
         wsMessageTimeout: 30000
@@ -2039,6 +2040,10 @@ async function processPaymentViaAPI() {
             tid: state.settings.tid,
             trx_id: payload.trx_id || PayloadBuilder.generateTrxId()
         };
+        // Serial Number di luar token (opsional, hanya dikirim jika diisi)
+        if (state.settings.serialNumber) {
+            requestBody.serial_number = state.settings.serialNumber;
+        }
         
         // Store for retry/re-push capability
         state.lastApiRequest = { apiUrl, requestBody };
@@ -2266,6 +2271,10 @@ async function checkTransactionStatus(trxId) {
             tid: state.settings.tid,
             trx_id: trxId
         };
+        // Serial Number di luar token (opsional, hanya dikirim jika diisi)
+        if (state.settings.serialNumber) {
+            requestBody.serial_number = state.settings.serialNumber;
+        }
         
         log(`POST ${apiUrl}`, 'info');
         log(`[DEBUG] Check Status request body: ${JSON.stringify(requestBody).substring(0, 200)}...`, 'info');
@@ -2716,6 +2725,7 @@ function saveSettingsToState() {
     state.settings.apiTimeout = parseInt(document.getElementById('apiTimeout')?.value) || 60;
     state.settings.mid = document.getElementById('mid')?.value || '';
     state.settings.tid = document.getElementById('tid')?.value || '';
+    state.settings.serialNumber = document.getElementById('serialNumber')?.value || '';
     
     // Save to localStorage
     localStorage.setItem('posSettings', JSON.stringify(state.settings));
@@ -2756,6 +2766,7 @@ function loadSettings() {
     document.getElementById('apiTimeout').value = state.settings.apiTimeout || 60;
     document.getElementById('mid').value = state.settings.mid || '';
     document.getElementById('tid').value = state.settings.tid || '';
+    document.getElementById('serialNumber').value = state.settings.serialNumber || '';
     
     // Update visibility of fields based on connection type
     updateConnectionFields();

@@ -25,7 +25,8 @@ Mengirim transaksi pembayaran ke EDC device melalui middleware.
   "token": "string (wajib) - Data transaksi terenkripsi dalam format Base64",
   "mid": "string (wajib) - Merchant ID",
   "tid": "string (wajib) - Terminal ID",
-  "trx_id": "string (wajib) - ID transaksi unik"
+  "trx_id": "string (wajib) - ID transaksi unik",
+  "serial_number": "string (opsional) - Serial Number EDC, di luar token"
 }
 ```
 
